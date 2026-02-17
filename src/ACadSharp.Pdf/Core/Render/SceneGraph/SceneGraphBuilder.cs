@@ -160,8 +160,8 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 
 			HashSet<string> stack = activeBlocks ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-			try
-			{
+				try
+				{
 					Entity prepared = applyLayerZeroInheritance(entity, containingInsert);
 
 					if (prepared is Insert insert)
@@ -177,16 +177,21 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 						return buildInsert(insert, effectiveInsertLayer, viewport, styleScaleToPaper, textScaleToPaper, containingInsert, parentTransform, depth, stack);
 					}
 
+					var vis = this._resolver.GetVisibility(prepared, viewport);
+					if (vis != VisibilityDecision.Visible)
+					{
+						this._log.Add(prepared.Handle, prepared.SubclassMarker, RenderStatus.Skipped, $"Visibility gate: {vis}");
+						return null;
+					}
+
+					if (prepared is MultiLeader mleader)
+					{
+						return buildMultiLeader(mleader, viewport, styleScaleToPaper, textScaleToPaper, containingInsert, parentTransform, depth, stack);
+					}
+
 				if (!isIdentity(parentTransform))
 				{
 					prepared = cloneWithTransform(prepared, parentTransform);
-				}
-
-				var vis = this._resolver.GetVisibility(prepared, viewport);
-				if (vis != VisibilityDecision.Visible)
-				{
-					this._log.Add(prepared.Handle, prepared.SubclassMarker, RenderStatus.Skipped, $"Visibility gate: {vis}");
-					return null;
 				}
 
 					switch (prepared)
@@ -749,6 +754,1047 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 
 			this._log.Add(mtext.Handle, mtext.SubclassMarker, RenderStatus.Rendered, "Rendered as MTEXT runs.");
 			return node;
+		}
+
+		private RenderNode buildMultiLeader(
+			MultiLeader mleader,
+			Viewport viewport,
+			double styleScaleToPaper,
+			double textScaleToPaper,
+			InsertRenderContext? containingInsert,
+			Matrix4 parentTransform,
+			int depth,
+			HashSet<string> activeBlocks)
+		{
+			if (mleader.ContextData == null)
+			{
+				this._log.Add(mleader.Handle, mleader.SubclassMarker, RenderStatus.Skipped, "MULTILEADER has no context data.");
+				return null;
+			}
+
+			var style = resolveMLeaderStyle(mleader);
+			var nodes = new List<RenderNode>();
+			XYZ contentAnchor = resolveMLeaderContentAnchor(style, mleader.ContextData);
+
+			StrokeStyle baseStroke = null;
+			if (style.PathType != MultiLeaderPathType.Invisible)
+			{
+				baseStroke = createMLeaderStroke(mleader, style.LineColor, style.LineWeight, style.LineType, styleScaleToPaper, containingInsert);
+
+					foreach (var root in mleader.ContextData.LeaderRoots)
+					{
+						if (root == null)
+						{
+							continue;
+						}
+
+						bool renderedLeaderLine = false;
+						foreach (var line in root.Lines)
+						{
+							if (line == null)
+							{
+								continue;
+							}
+
+						var lineStyle = resolveMLeaderLineStyle(style, line);
+						if (lineStyle.PathType == MultiLeaderPathType.Invisible)
+						{
+							continue;
+						}
+
+						StrokeStyle lineStroke = createMLeaderStroke(mleader, lineStyle.LineColor, lineStyle.LineWeight, lineStyle.LineType, styleScaleToPaper, containingInsert);
+						bool horizontalAttachment = hasHorizontalAttachment(root, style.TextAttachmentDirection);
+						double landingDistance = resolveLandingDistance(style, root);
+						XYZ doglegDirection = resolveDoglegDirection(root, horizontalAttachment, contentAnchor);
+						XYZ doglegEndpoint = root.ConnectionPoint + doglegDirection * landingDistance;
+						bool drawDogleg = shouldDrawDogleg(style, lineStyle.PathType, horizontalAttachment, landingDistance, doglegDirection);
+						XYZ leaderEnd = horizontalAttachment
+							? (drawDogleg ? root.ConnectionPoint : doglegEndpoint)
+							: root.ConnectionPoint;
+
+							var leaderVertices = buildLeaderVertices(line, leaderEnd);
+							if (leaderVertices.Count < 2)
+							{
+								continue;
+							}
+
+							renderedLeaderLine = true;
+							if (lineStyle.PathType == MultiLeaderPathType.Spline)
+							{
+								List<XYZ> spline = tessellateSpline(leaderVertices);
+								if (spline.Count >= 2)
+								{
+								var points = new List<XY>(spline.Count);
+								foreach (var point in spline)
+								{
+									points.Add(transformPointToXY(point, parentTransform));
+								}
+
+								PathNode splinePath = createPolylinePath(mleader.Handle, points, lineStroke, closed: false);
+								if (splinePath != null)
+								{
+									nodes.Add(splinePath);
+								}
+							}
+						}
+						else
+						{
+							bool hasBreaks = line.StartEndPoints != null && line.StartEndPoints.Count > 0;
+							if (!hasBreaks)
+							{
+								var points = new List<XY>(leaderVertices.Count);
+								foreach (var point in leaderVertices)
+								{
+									points.Add(transformPointToXY(point, parentTransform));
+								}
+
+								PathNode path = createPolylinePath(mleader.Handle, points, lineStroke, closed: false);
+								if (path != null)
+								{
+									nodes.Add(path);
+								}
+							}
+							else
+							{
+								int breakSegmentIndex = line.SegmentIndex;
+								if (breakSegmentIndex < 0 || breakSegmentIndex >= leaderVertices.Count - 1)
+								{
+									breakSegmentIndex = 0;
+								}
+
+								for (int segmentIndex = 0; segmentIndex < leaderVertices.Count - 1; segmentIndex++)
+								{
+									IList<MultiLeaderObjectContextData.StartEndPointPair> segmentBreaks =
+										segmentIndex == breakSegmentIndex ? line.StartEndPoints : null;
+
+									foreach (var piece in splitSegmentByBreaks(leaderVertices[segmentIndex], leaderVertices[segmentIndex + 1], segmentBreaks))
+									{
+										PathNode piecePath = createLinePath(
+											mleader.Handle,
+											transformPointToXY(piece.Start, parentTransform),
+											transformPointToXY(piece.End, parentTransform),
+											lineStroke);
+
+										if (piecePath != null)
+										{
+											nodes.Add(piecePath);
+										}
+									}
+								}
+							}
+						}
+
+						addMLeaderArrow(
+							nodes,
+							mleader,
+							lineStyle,
+							lineStroke,
+							leaderVertices,
+							viewport,
+							styleScaleToPaper,
+							textScaleToPaper,
+							parentTransform,
+							depth,
+							activeBlocks);
+					}
+
+						bool rootHorizontalAttachment = hasHorizontalAttachment(root, style.TextAttachmentDirection);
+						double rootLandingDistance = resolveLandingDistance(style, root);
+						XYZ rootDoglegDirection = resolveDoglegDirection(root, rootHorizontalAttachment, contentAnchor);
+						if (renderedLeaderLine && shouldDrawDogleg(style, style.PathType, rootHorizontalAttachment, rootLandingDistance, rootDoglegDirection))
+						{
+							XYZ doglegStart = root.ConnectionPoint;
+							XYZ doglegEnd = doglegStart + rootDoglegDirection * rootLandingDistance;
+
+							foreach (var piece in splitSegmentByBreaks(doglegStart, doglegEnd, root.BreakStartEndPointsPairs))
+						{
+							PathNode doglegPath = createLinePath(
+								mleader.Handle,
+								transformPointToXY(piece.Start, parentTransform),
+								transformPointToXY(piece.End, parentTransform),
+								baseStroke);
+
+							if (doglegPath != null)
+							{
+								nodes.Add(doglegPath);
+							}
+						}
+					}
+				}
+			}
+
+			RenderNode contentNode = buildMLeaderContent(
+				mleader,
+				style,
+				viewport,
+				styleScaleToPaper,
+				textScaleToPaper,
+				containingInsert,
+				parentTransform,
+				depth,
+				activeBlocks);
+
+			if (contentNode != null)
+			{
+				nodes.Add(contentNode);
+			}
+
+			if (nodes.Count == 0)
+			{
+				this._log.Add(mleader.Handle, mleader.SubclassMarker, RenderStatus.Skipped, "MULTILEADER produced no visible primitives.");
+				return null;
+			}
+
+			this._log.Add(mleader.Handle, mleader.SubclassMarker, RenderStatus.Rendered, "Rendered as computed MULTILEADER geometry.");
+			return new GroupNode(mleader.Handle, Matrix4.Identity, nodes);
+		}
+
+		private RenderNode buildMLeaderContent(
+			MultiLeader mleader,
+			MLeaderResolvedStyle style,
+			Viewport viewport,
+			double styleScaleToPaper,
+			double textScaleToPaper,
+			InsertRenderContext? containingInsert,
+			Matrix4 parentTransform,
+			int depth,
+			HashSet<string> activeBlocks)
+		{
+			switch (style.ContentType)
+			{
+				case LeaderContentType.None:
+					return null;
+				case LeaderContentType.MText:
+					{
+						MText text = createMLeaderText(mleader, style);
+						if (text == null)
+						{
+							return null;
+						}
+
+						MText transformed = text;
+						if (!isIdentity(parentTransform))
+						{
+							transformed = (MText)cloneWithTransform(text, parentTransform);
+						}
+
+						ACadSharp.Color color = resolveStroke(transformed, textScaleToPaper, containingInsert).Color;
+						return this._textLayout.LayoutMText(transformed, textScaleToPaper, color);
+					}
+				case LeaderContentType.Block:
+					{
+						Insert insert = createMLeaderBlockInsert(mleader, style);
+						if (insert == null)
+						{
+							return null;
+						}
+
+						return buildEntityNode(
+							insert,
+							viewport,
+							styleScaleToPaper,
+							textScaleToPaper,
+							containingInsert,
+							parentTransform,
+							depth + 1,
+							activeBlocks);
+					}
+				default:
+					this._log.Add(mleader.Handle, mleader.SubclassMarker, RenderStatus.NotImplemented, $"MULTILEADER content type '{style.ContentType}' not supported.");
+					this._configuration.Notify($"[{mleader.SubclassMarker}] MULTILEADER content type not implemented (scene graph pipeline).", NotificationType.NotImplemented);
+					return null;
+			}
+		}
+
+		private void addMLeaderArrow(
+			List<RenderNode> nodes,
+			MultiLeader mleader,
+			MLeaderLineStyle lineStyle,
+			StrokeStyle stroke,
+			List<XYZ> vertices,
+			Viewport viewport,
+			double styleScaleToPaper,
+			double textScaleToPaper,
+			Matrix4 parentTransform,
+			int depth,
+			HashSet<string> activeBlocks)
+		{
+			if (lineStyle.ArrowheadSize <= 1e-9 || vertices == null || vertices.Count < 2)
+			{
+				return;
+			}
+
+			XYZ tip = vertices[0];
+			XYZ next = vertices[1];
+			XYZ forward = next - tip;
+			double length = Math.Sqrt(forward.Dot(forward));
+			if (length <= 1e-9 || length <= lineStyle.ArrowheadSize * 2.0)
+			{
+				return;
+			}
+
+			XYZ directionToTip = safeNormalize(tip - next, new XYZ(-1.0, 0.0, 0.0));
+
+			if (lineStyle.Arrowhead != null)
+			{
+				var arrowInsert = new Insert(lineStyle.Arrowhead)
+				{
+					InsertPoint = tip,
+					XScale = lineStyle.ArrowheadSize,
+					YScale = lineStyle.ArrowheadSize,
+					ZScale = 1.0,
+					Rotation = Math.Atan2(directionToTip.Y, directionToTip.X),
+						Layer = mleader.Layer,
+						Color = stroke.Color,
+						LineWeight = LineWeightType.ByLayer,
+						LineType = LineType.ByLayer,
+						Normal = XYZ.AxisZ,
+					};
+
+				RenderNode arrowNode = buildEntityNode(
+					arrowInsert,
+					viewport,
+					styleScaleToPaper,
+					textScaleToPaper,
+					containingInsert: null,
+					parentTransform,
+					depth + 1,
+					activeBlocks);
+
+				if (arrowNode != null)
+				{
+					nodes.Add(arrowNode);
+					return;
+				}
+			}
+
+			XY dir = new XY(directionToTip.X, directionToTip.Y);
+			if (!tryNormalize(dir, out XY normDir))
+			{
+				return;
+			}
+
+			XY perp = perpendicularLeft(normDir);
+			XYZ back = tip - directionToTip * lineStyle.ArrowheadSize;
+			XYZ left = back + new XYZ(perp.X, perp.Y, 0.0) * (lineStyle.ArrowheadSize * 0.3);
+			XYZ right = back - new XYZ(perp.X, perp.Y, 0.0) * (lineStyle.ArrowheadSize * 0.3);
+
+			var segs = new PathSegment[]
+			{
+				new MoveTo(transformPointToXY(tip, parentTransform)),
+				new LineTo(transformPointToXY(left, parentTransform)),
+				new LineTo(transformPointToXY(right, parentTransform)),
+				new ClosePath(),
+			};
+
+			nodes.Add(new PathNode(mleader.Handle, segs, stroke: null, fill: new FillStyle(stroke.Color)));
+		}
+
+		private MLeaderResolvedStyle resolveMLeaderStyle(MultiLeader mleader)
+		{
+			MultiLeaderStyle style = mleader.Style ?? MultiLeaderStyle.Default;
+			MultiLeaderObjectContextData context = mleader.ContextData;
+			MultiLeaderPropertyOverrideFlags flags = mleader.PropertyOverrideFlags;
+
+			MultiLeaderPathType pathType = hasFlag(flags, MultiLeaderPropertyOverrideFlags.PathType)
+				? mleader.PathType
+				: style.PathType;
+			if (pathType == MultiLeaderPathType.Invisible && mleader.PathType != MultiLeaderPathType.Invisible)
+			{
+				pathType = mleader.PathType;
+			}
+
+			ACadSharp.Color lineColor = hasFlag(flags, MultiLeaderPropertyOverrideFlags.LineColor)
+				? mleader.LineColor
+				: style.LineColor;
+			if (lineColor.IsByBlock && !mleader.LineColor.IsByBlock)
+			{
+				lineColor = mleader.LineColor;
+			}
+
+			LineType lineType = hasFlag(flags, MultiLeaderPropertyOverrideFlags.LeaderLineType)
+				? mleader.LeaderLineType
+				: style.LeaderLineType;
+			lineType ??= mleader.LeaderLineType ?? LineType.ByLayer;
+
+			LineWeightType lineWeight = hasFlag(flags, MultiLeaderPropertyOverrideFlags.LeaderLineWeight)
+				? mleader.LeaderLineWeight
+				: style.LeaderLineWeight;
+			if (lineWeight == LineWeightType.ByBlock && mleader.LeaderLineWeight != LineWeightType.ByBlock)
+			{
+				lineWeight = mleader.LeaderLineWeight;
+			}
+
+			bool enableDogleg = hasFlag(flags, MultiLeaderPropertyOverrideFlags.EnableDogleg)
+				? mleader.EnableDogleg
+				: style.EnableDogleg;
+
+			bool enableLanding = hasFlag(flags, MultiLeaderPropertyOverrideFlags.EnableLanding)
+				? mleader.EnableLanding
+				: style.EnableLanding;
+
+			double landingDistance = hasFlag(flags, MultiLeaderPropertyOverrideFlags.LandingDistance)
+				? mleader.LandingDistance
+				: style.LandingDistance;
+			if (landingDistance <= 1e-9 && mleader.LandingDistance > 1e-9)
+			{
+				landingDistance = mleader.LandingDistance;
+			}
+
+			double landingGap = context.LandingGap > 1e-9 ? context.LandingGap : style.LandingGap;
+
+			BlockRecord arrowhead = hasFlag(flags, MultiLeaderPropertyOverrideFlags.Arrowhead)
+				? mleader.Arrowhead
+				: style.Arrowhead;
+			if (arrowhead == null && mleader.Arrowhead != null)
+			{
+				arrowhead = mleader.Arrowhead;
+			}
+
+			double arrowheadSize = context.ArrowheadSize > 1e-9
+				? context.ArrowheadSize
+				: (hasFlag(flags, MultiLeaderPropertyOverrideFlags.ArrowheadSize) ? mleader.ArrowheadSize : style.ArrowheadSize);
+			if (arrowheadSize <= 1e-9 && mleader.ArrowheadSize > 1e-9)
+			{
+				arrowheadSize = mleader.ArrowheadSize;
+			}
+
+			LeaderContentType contentType = hasFlag(flags, MultiLeaderPropertyOverrideFlags.ContentType)
+				? mleader.ContentType
+				: style.ContentType;
+			if (context.HasTextContents)
+			{
+				contentType = LeaderContentType.MText;
+			}
+			else if (context.HasContentsBlock)
+			{
+				contentType = LeaderContentType.Block;
+			}
+
+			TextStyle textStyle = context.TextStyle
+				?? (hasFlag(flags, MultiLeaderPropertyOverrideFlags.TextStyle) ? mleader.TextStyle : style.TextStyle)
+				?? TextStyle.Default;
+
+			ACadSharp.Color textColor;
+			if (context.HasTextContents || !string.IsNullOrWhiteSpace(context.TextLabel))
+			{
+				textColor = context.TextColor;
+			}
+			else
+			{
+				textColor = hasFlag(flags, MultiLeaderPropertyOverrideFlags.TextColor)
+					? mleader.TextColor
+					: style.TextColor;
+			}
+
+			double textHeight = context.TextHeight > 1e-9
+				? context.TextHeight
+				: (hasFlag(flags, MultiLeaderPropertyOverrideFlags.TextHeight) ? mleader.ContextData.TextHeight : style.TextHeight);
+			if (textHeight <= 1e-9)
+			{
+				textHeight = style.TextHeight > 1e-9 ? style.TextHeight : 1.0;
+			}
+
+			TextAttachmentDirectionType textAttachmentDirection = hasFlag(flags, MultiLeaderPropertyOverrideFlags.TextAttachmentDirection)
+				? mleader.TextAttachmentDirection
+				: style.TextAttachmentDirection;
+
+			BlockRecord blockContent = context.BlockContent
+				?? (hasFlag(flags, MultiLeaderPropertyOverrideFlags.BlockContent) ? mleader.BlockContent : style.BlockContent)
+				?? mleader.BlockContent;
+
+			ACadSharp.Color blockColor = hasFlag(flags, MultiLeaderPropertyOverrideFlags.BlockContentColor)
+				? mleader.BlockContentColor
+				: style.BlockContentColor;
+			if (!context.BlockContentColor.IsByBlock)
+			{
+				blockColor = context.BlockContentColor;
+			}
+
+			XYZ blockScale = isZeroVector(context.BlockContentScale)
+				? (hasFlag(flags, MultiLeaderPropertyOverrideFlags.BlockContentScale) ? mleader.BlockContentScale : style.BlockContentScale)
+				: context.BlockContentScale;
+			if (isZeroVector(blockScale))
+			{
+				blockScale = new XYZ(1.0, 1.0, 1.0);
+			}
+
+			double blockRotation = Math.Abs(context.BlockContentRotation) > 1e-9
+				? context.BlockContentRotation
+				: (hasFlag(flags, MultiLeaderPropertyOverrideFlags.BlockContentRotation) ? mleader.BlockContentRotation : style.BlockContentRotation);
+
+			XYZ blockLocation = !isZeroVector(context.BlockContentLocation)
+				? context.BlockContentLocation
+				: context.ContentBasePoint;
+
+			XYZ blockNormal = !isZeroVector(context.BlockContentNormal)
+				? context.BlockContentNormal
+				: XYZ.AxisZ;
+
+			return new MLeaderResolvedStyle(
+				pathType,
+				lineColor,
+				lineType,
+				lineWeight,
+				enableDogleg,
+				enableLanding,
+				landingDistance,
+				landingGap,
+				arrowhead,
+				arrowheadSize,
+				contentType,
+				textStyle,
+				textColor,
+				textHeight,
+				textAttachmentDirection,
+				blockContent,
+				blockColor,
+				blockScale,
+				blockRotation,
+				blockLocation,
+				blockNormal);
+		}
+
+		private static MLeaderLineStyle resolveMLeaderLineStyle(MLeaderResolvedStyle style, MultiLeaderObjectContextData.LeaderLine line)
+		{
+			var flags = line.OverrideFlags;
+			MultiLeaderPathType pathType = hasFlag(flags, LeaderLinePropertOverrideFlags.PathType) ? line.PathType : style.PathType;
+			if (pathType == MultiLeaderPathType.Invisible && line.PathType != MultiLeaderPathType.Invisible)
+			{
+				pathType = line.PathType;
+			}
+
+			ACadSharp.Color lineColor = hasFlag(flags, LeaderLinePropertOverrideFlags.LineColor) ? line.LineColor : style.LineColor;
+			if (lineColor.IsByBlock && !line.LineColor.IsByBlock)
+			{
+				lineColor = line.LineColor;
+			}
+
+			LineType lineType = hasFlag(flags, LeaderLinePropertOverrideFlags.LineType) ? line.LineType : style.LineType;
+			lineType ??= style.LineType ?? LineType.ByLayer;
+
+			LineWeightType lineWeight = hasFlag(flags, LeaderLinePropertOverrideFlags.LineWeight) ? line.LineWeight : style.LineWeight;
+			if (lineWeight == LineWeightType.ByBlock && line.LineWeight != LineWeightType.ByBlock)
+			{
+				lineWeight = line.LineWeight;
+			}
+
+			double arrowheadSize = hasFlag(flags, LeaderLinePropertOverrideFlags.ArrowheadSize) ? line.ArrowheadSize : style.ArrowheadSize;
+			if (arrowheadSize <= 1e-9 && line.ArrowheadSize > 1e-9)
+			{
+				arrowheadSize = line.ArrowheadSize;
+			}
+
+			BlockRecord arrowhead = hasFlag(flags, LeaderLinePropertOverrideFlags.Arrowhead) ? line.Arrowhead : style.Arrowhead;
+			if (arrowhead == null && line.Arrowhead != null)
+			{
+				arrowhead = line.Arrowhead;
+			}
+
+			return new MLeaderLineStyle(pathType, lineColor, lineType, lineWeight, arrowhead, arrowheadSize);
+		}
+
+		private StrokeStyle createMLeaderStroke(
+			MultiLeader mleader,
+			ACadSharp.Color color,
+			LineWeightType lineWeight,
+			LineType lineType,
+			double styleScaleToPaper,
+			InsertRenderContext? containingInsert)
+		{
+			double globalLtScale = mleader?.Document?.Header?.LineTypeScale ?? 1.0;
+			var proxy = new Line
+			{
+				StartPoint = XYZ.Zero,
+				EndPoint = XY.AxisX.Convert<XYZ>(),
+				Layer = mleader?.Layer,
+				Color = color,
+				LineWeight = lineWeight,
+				LineType = lineType ?? LineType.ByLayer,
+				LineTypeScale = globalLtScale,
+			};
+
+			return resolveStroke(proxy, styleScaleToPaper, containingInsert);
+		}
+
+		private static List<XYZ> buildLeaderVertices(MultiLeaderObjectContextData.LeaderLine line, XYZ endPoint)
+		{
+			var vertices = new List<XYZ>(line.Points.Count + 1);
+			foreach (var point in line.Points)
+			{
+				vertices.Add(point);
+			}
+
+			if (vertices.Count == 0 || vertices[vertices.Count - 1].DistanceFrom(endPoint) > 1e-9)
+			{
+				vertices.Add(endPoint);
+			}
+
+			return vertices;
+		}
+
+		private static bool shouldDrawDogleg(
+			MLeaderResolvedStyle style,
+			MultiLeaderPathType pathType,
+			bool horizontalAttachment,
+			double landingDistance,
+			XYZ doglegDirection)
+		{
+			return horizontalAttachment
+				&& style.EnableLanding
+				&& style.EnableDogleg
+				&& pathType == MultiLeaderPathType.StraightLineSegments
+				&& landingDistance > 1e-9
+				&& !isZeroVector(doglegDirection);
+		}
+
+		private static bool hasHorizontalAttachment(MultiLeaderObjectContextData.LeaderRoot root, TextAttachmentDirectionType fallback)
+		{
+			if (root == null)
+			{
+				return fallback != TextAttachmentDirectionType.Vertical;
+			}
+
+			return root.TextAttachmentDirection != TextAttachmentDirectionType.Vertical
+				&& fallback != TextAttachmentDirectionType.Vertical;
+		}
+
+		private static double resolveLandingDistance(MLeaderResolvedStyle style, MultiLeaderObjectContextData.LeaderRoot root)
+		{
+			if (root != null && root.LandingDistance > 1e-9)
+			{
+				return root.LandingDistance;
+			}
+
+			return Math.Max(0.0, style.LandingDistance);
+		}
+
+		private static XYZ resolveMLeaderContentAnchor(MLeaderResolvedStyle style, MultiLeaderObjectContextData context)
+		{
+			switch (style.ContentType)
+			{
+				case LeaderContentType.MText:
+					return !isZeroVector(context.TextLocation) ? context.TextLocation : context.ContentBasePoint;
+				case LeaderContentType.Block:
+					return !isZeroVector(style.BlockLocation) ? style.BlockLocation : context.ContentBasePoint;
+				default:
+					return context.ContentBasePoint;
+			}
+		}
+
+		private static XYZ resolveDoglegDirection(MultiLeaderObjectContextData.LeaderRoot root, bool horizontalAttachment, XYZ contentAnchor)
+		{
+			XYZ raw = root.Direction;
+			if (!isZeroVector(raw))
+			{
+				XYZ normalized = safeNormalize(raw, XYZ.AxisX);
+				if (horizontalAttachment)
+				{
+					double x = Math.Abs(normalized.X) > 1e-9 ? Math.Sign(normalized.X) : 1.0;
+					return new XYZ(x, 0.0, 0.0);
+				}
+
+				return normalized;
+			}
+
+			XYZ toContent = contentAnchor - root.ConnectionPoint;
+			if (horizontalAttachment)
+			{
+				double x = Math.Abs(toContent.X) > 1e-9 ? Math.Sign(toContent.X) : 1.0;
+				return new XYZ(x, 0.0, 0.0);
+			}
+
+			if (Math.Abs(toContent.Y) > 1e-9)
+			{
+				return safeNormalize(toContent, XYZ.AxisY);
+			}
+
+			return XYZ.AxisX;
+		}
+
+		private static IEnumerable<(XYZ Start, XYZ End)> splitSegmentByBreaks(
+			XYZ start,
+			XYZ end,
+			IList<MultiLeaderObjectContextData.StartEndPointPair> breaks)
+		{
+			XYZ delta = end - start;
+			double len2 = delta.Dot(delta);
+			if (len2 <= 1e-12)
+			{
+				yield break;
+			}
+
+			if (breaks == null || breaks.Count == 0)
+			{
+				yield return (start, end);
+				yield break;
+			}
+
+			var intervals = new List<(double Start, double End)>(breaks.Count);
+			foreach (var segmentBreak in breaks)
+			{
+				double t1 = (segmentBreak.StartPoint - start).Dot(delta) / len2;
+				double t2 = (segmentBreak.EndPoint - start).Dot(delta) / len2;
+				double from = Math.Max(0.0, Math.Min(1.0, Math.Min(t1, t2)));
+				double to = Math.Max(0.0, Math.Min(1.0, Math.Max(t1, t2)));
+				if (to - from > 1e-9)
+				{
+					intervals.Add((from, to));
+				}
+			}
+
+			if (intervals.Count == 0)
+			{
+				yield return (start, end);
+				yield break;
+			}
+
+			intervals.Sort((a, b) => a.Start.CompareTo(b.Start));
+
+			double cursor = 0.0;
+			foreach (var interval in intervals)
+			{
+				if (interval.Start > cursor + 1e-9)
+				{
+					yield return (start + delta * cursor, start + delta * interval.Start);
+				}
+
+				if (interval.End > cursor)
+				{
+					cursor = interval.End;
+					if (cursor >= 1.0 - 1e-9)
+					{
+						yield break;
+					}
+				}
+			}
+
+			if (cursor < 1.0 - 1e-9)
+			{
+				yield return (start + delta * cursor, end);
+			}
+		}
+
+		private List<XYZ> tessellateSpline(IReadOnlyList<XYZ> fitPoints)
+		{
+			if (fitPoints == null || fitPoints.Count == 0)
+			{
+				return new List<XYZ>();
+			}
+
+			var points = new List<XYZ>(fitPoints.Count);
+			XYZ previous = fitPoints[0];
+			points.Add(previous);
+			for (int i = 1; i < fitPoints.Count; i++)
+			{
+				XYZ current = fitPoints[i];
+				if (current.DistanceFrom(previous) <= 1e-9)
+				{
+					continue;
+				}
+
+				points.Add(current);
+				previous = current;
+			}
+
+			if (points.Count <= 2)
+			{
+				return points;
+			}
+
+			int segmentsPerSpan = Math.Max(4, Math.Min(32, this._configuration.ArcPrecision / 32));
+			var output = new List<XYZ>((points.Count - 1) * segmentsPerSpan + 1);
+			for (int i = 0; i < points.Count - 1; i++)
+			{
+				XYZ p0 = i > 0 ? points[i - 1] : points[i];
+				XYZ p1 = points[i];
+				XYZ p2 = points[i + 1];
+				XYZ p3 = i + 2 < points.Count ? points[i + 2] : points[i + 1];
+
+				if (i == 0)
+				{
+					output.Add(p1);
+				}
+
+				for (int s = 1; s <= segmentsPerSpan; s++)
+				{
+					double t = (double)s / segmentsPerSpan;
+					output.Add(catmullRom(p0, p1, p2, p3, t));
+				}
+			}
+
+			return output;
+		}
+
+		private static XYZ catmullRom(XYZ p0, XYZ p1, XYZ p2, XYZ p3, double t)
+		{
+			double t2 = t * t;
+			double t3 = t2 * t;
+			double x = 0.5 * ((2.0 * p1.X) + (-p0.X + p2.X) * t + (2.0 * p0.X - 5.0 * p1.X + 4.0 * p2.X - p3.X) * t2 + (-p0.X + 3.0 * p1.X - 3.0 * p2.X + p3.X) * t3);
+			double y = 0.5 * ((2.0 * p1.Y) + (-p0.Y + p2.Y) * t + (2.0 * p0.Y - 5.0 * p1.Y + 4.0 * p2.Y - p3.Y) * t2 + (-p0.Y + 3.0 * p1.Y - 3.0 * p2.Y + p3.Y) * t3);
+			double z = 0.5 * ((2.0 * p1.Z) + (-p0.Z + p2.Z) * t + (2.0 * p0.Z - 5.0 * p1.Z + 4.0 * p2.Z - p3.Z) * t2 + (-p0.Z + 3.0 * p1.Z - 3.0 * p2.Z + p3.Z) * t3);
+			return new XYZ(x, y, z);
+		}
+
+		private static XY transformPointToXY(XYZ point, Matrix4 transform)
+		{
+			XYZ world = transform * point;
+			return new XY(world.X, world.Y);
+		}
+
+		private static bool isZeroVector(XYZ value)
+		{
+			return Math.Abs(value.X) <= 1e-9
+				&& Math.Abs(value.Y) <= 1e-9
+				&& Math.Abs(value.Z) <= 1e-9;
+		}
+
+		private static XYZ safeNormalize(XYZ value, XYZ fallback)
+		{
+			if (isZeroVector(value))
+			{
+				return fallback;
+			}
+
+			return value.Normalize();
+		}
+
+		private static bool hasFlag(MultiLeaderPropertyOverrideFlags flags, MultiLeaderPropertyOverrideFlags expected)
+		{
+			return (flags & expected) == expected;
+		}
+
+		private static bool hasFlag(LeaderLinePropertOverrideFlags flags, LeaderLinePropertOverrideFlags expected)
+		{
+			return (flags & expected) == expected;
+		}
+
+		private static MText createMLeaderText(MultiLeader mleader, MLeaderResolvedStyle style)
+		{
+			MultiLeaderObjectContextData context = mleader.ContextData;
+			string value = context.TextLabel;
+			if (string.IsNullOrWhiteSpace(value))
+			{
+				value = mleader.Style?.DefaultTextContents ?? string.Empty;
+			}
+
+			if (string.IsNullOrWhiteSpace(value))
+			{
+				return null;
+			}
+
+			var mtext = new MText(value)
+			{
+				InsertPoint = context.TextLocation,
+				Height = Math.Max(style.TextHeight, 1e-6),
+				RectangleWidth = context.BoundaryWidth > 1e-9 ? context.BoundaryWidth : 0.0,
+				LineSpacing = context.LineSpacingFactor > 1e-9 ? context.LineSpacingFactor : 1.0,
+				LineSpacingStyle = mapMLeaderLineSpacing(context.LineSpacing),
+					AttachmentPoint = mapMLeaderAttachmentPoint(context.TextAlignment),
+					Style = style.TextStyle ?? TextStyle.Default,
+					Color = style.TextColor,
+					Layer = mleader.Layer,
+					Normal = isZeroVector(context.TextNormal) ? XYZ.AxisZ : context.TextNormal,
+				};
+
+			XYZ direction = !isZeroVector(context.Direction)
+				? safeNormalize(context.Direction, XYZ.AxisX)
+				: new XYZ(Math.Cos(context.TextRotation), Math.Sin(context.TextRotation), 0.0);
+			if (isZeroVector(direction))
+			{
+				direction = XYZ.AxisX;
+			}
+
+			mtext.AlignmentPoint = direction;
+			return mtext;
+		}
+
+		private static AttachmentPointType mapMLeaderAttachmentPoint(TextAlignmentType alignment)
+		{
+			switch (alignment)
+			{
+				case TextAlignmentType.Center:
+					return AttachmentPointType.MiddleCenter;
+				case TextAlignmentType.Right:
+					return AttachmentPointType.MiddleRight;
+				default:
+					return AttachmentPointType.MiddleLeft;
+			}
+		}
+
+		private static LineSpacingStyleType mapMLeaderLineSpacing(LineSpacingStyle spacing)
+		{
+			return spacing == LineSpacingStyle.Exactly
+				? LineSpacingStyleType.Exact
+				: LineSpacingStyleType.AtLeast;
+		}
+
+		private Insert createMLeaderBlockInsert(MultiLeader mleader, MLeaderResolvedStyle style)
+		{
+			BlockRecord block = style.BlockContent;
+			if (block == null)
+			{
+				this._log.Add(mleader.Handle, mleader.SubclassMarker, RenderStatus.Skipped, "MULTILEADER block content is missing.");
+				return null;
+			}
+
+			if (Math.Abs(style.BlockScale.X) <= 1e-9
+				|| Math.Abs(style.BlockScale.Y) <= 1e-9
+				|| Math.Abs(style.BlockScale.Z) <= 1e-9)
+			{
+				this._log.Add(mleader.Handle, mleader.SubclassMarker, RenderStatus.Skipped, "MULTILEADER block content has degenerate scale.");
+				return null;
+			}
+
+			var insert = new Insert(block)
+			{
+				InsertPoint = style.BlockLocation,
+				XScale = style.BlockScale.X,
+				YScale = style.BlockScale.Y,
+				ZScale = style.BlockScale.Z,
+				Rotation = style.BlockRotation,
+				Normal = isZeroVector(style.BlockNormal) ? XYZ.AxisZ : style.BlockNormal,
+				Layer = mleader.Layer,
+				Color = style.BlockColor,
+			};
+
+			applyMLeaderBlockAttributes(insert, mleader.BlockAttributes);
+			return insert;
+		}
+
+		private static void applyMLeaderBlockAttributes(Insert insert, IList<MultiLeader.BlockAttribute> blockAttributes)
+		{
+			if (insert == null || blockAttributes == null || blockAttributes.Count == 0 || insert.Attributes == null)
+			{
+				return;
+			}
+
+			var valuesByTag = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+			foreach (var blockAttribute in blockAttributes)
+			{
+				string tag = blockAttribute.AttributeDefinition?.Tag;
+				if (string.IsNullOrWhiteSpace(tag))
+				{
+					continue;
+				}
+
+				valuesByTag[tag] = blockAttribute.Text ?? string.Empty;
+			}
+
+			if (valuesByTag.Count == 0)
+			{
+				return;
+			}
+
+			foreach (var attribute in insert.Attributes)
+			{
+				if (attribute == null || string.IsNullOrWhiteSpace(attribute.Tag))
+				{
+					continue;
+				}
+
+				if (valuesByTag.TryGetValue(attribute.Tag, out string value))
+				{
+					attribute.Value = value;
+				}
+			}
+		}
+
+		private readonly struct MLeaderResolvedStyle
+		{
+			public MultiLeaderPathType PathType { get; }
+			public ACadSharp.Color LineColor { get; }
+			public LineType LineType { get; }
+			public LineWeightType LineWeight { get; }
+			public bool EnableDogleg { get; }
+			public bool EnableLanding { get; }
+			public double LandingDistance { get; }
+			public double LandingGap { get; }
+			public BlockRecord Arrowhead { get; }
+			public double ArrowheadSize { get; }
+			public LeaderContentType ContentType { get; }
+			public TextStyle TextStyle { get; }
+			public ACadSharp.Color TextColor { get; }
+			public double TextHeight { get; }
+			public TextAttachmentDirectionType TextAttachmentDirection { get; }
+			public BlockRecord BlockContent { get; }
+			public ACadSharp.Color BlockColor { get; }
+			public XYZ BlockScale { get; }
+			public double BlockRotation { get; }
+			public XYZ BlockLocation { get; }
+			public XYZ BlockNormal { get; }
+
+			public MLeaderResolvedStyle(
+				MultiLeaderPathType pathType,
+				ACadSharp.Color lineColor,
+				LineType lineType,
+				LineWeightType lineWeight,
+				bool enableDogleg,
+				bool enableLanding,
+				double landingDistance,
+				double landingGap,
+				BlockRecord arrowhead,
+				double arrowheadSize,
+				LeaderContentType contentType,
+				TextStyle textStyle,
+				ACadSharp.Color textColor,
+				double textHeight,
+				TextAttachmentDirectionType textAttachmentDirection,
+				BlockRecord blockContent,
+				ACadSharp.Color blockColor,
+				XYZ blockScale,
+				double blockRotation,
+				XYZ blockLocation,
+				XYZ blockNormal)
+			{
+				this.PathType = pathType;
+				this.LineColor = lineColor;
+				this.LineType = lineType;
+				this.LineWeight = lineWeight;
+				this.EnableDogleg = enableDogleg;
+				this.EnableLanding = enableLanding;
+				this.LandingDistance = landingDistance;
+				this.LandingGap = landingGap;
+				this.Arrowhead = arrowhead;
+				this.ArrowheadSize = arrowheadSize;
+				this.ContentType = contentType;
+				this.TextStyle = textStyle;
+				this.TextColor = textColor;
+				this.TextHeight = textHeight;
+				this.TextAttachmentDirection = textAttachmentDirection;
+				this.BlockContent = blockContent;
+				this.BlockColor = blockColor;
+				this.BlockScale = blockScale;
+				this.BlockRotation = blockRotation;
+				this.BlockLocation = blockLocation;
+				this.BlockNormal = blockNormal;
+			}
+		}
+
+		private readonly struct MLeaderLineStyle
+		{
+			public MultiLeaderPathType PathType { get; }
+			public ACadSharp.Color LineColor { get; }
+			public LineType LineType { get; }
+			public LineWeightType LineWeight { get; }
+			public BlockRecord Arrowhead { get; }
+			public double ArrowheadSize { get; }
+
+			public MLeaderLineStyle(
+				MultiLeaderPathType pathType,
+				ACadSharp.Color lineColor,
+				LineType lineType,
+				LineWeightType lineWeight,
+				BlockRecord arrowhead,
+				double arrowheadSize)
+			{
+				this.PathType = pathType;
+				this.LineColor = lineColor;
+				this.LineType = lineType;
+				this.LineWeight = lineWeight;
+				this.Arrowhead = arrowhead;
+				this.ArrowheadSize = arrowheadSize;
+			}
 		}
 
 		private RenderNode buildDimension(
