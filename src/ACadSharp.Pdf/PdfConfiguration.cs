@@ -65,6 +65,19 @@ namespace ACadSharp.Pdf
 		/// </summary>
 		public string DecimalFormat { get; set; } = "0.####";
 
+		/// <summary>
+		/// Enable the Stage 00 scene-graph rendering pipeline (IR → flatten → PDF).
+		/// </summary>
+		/// <remarks>
+		/// This is disabled by default to keep A/B parity with the legacy <see cref="Core.IO.PdfPen"/> pipeline.
+		/// </remarks>
+		public bool UseSceneGraph { get; set; } = false;
+
+		/// <summary>
+		/// Render log produced by the most recent scene-graph render.
+		/// </summary>
+		public Core.Render.RenderLog LastRenderLog { get; internal set; } = null;
+
 		public Dictionary<LineWeightType, double> LineWeightValues { get; set; } = new();
 
 		public double GetLineWeightValue(LineWeightType lineWeight)
