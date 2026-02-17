@@ -28,7 +28,8 @@ namespace ACadSharp.Pdf.Tests.Integration
 			this.AssertValidPdf(pdf);
 		}
 
-		[Fact(Skip = "Stage 05 (Hatch) rendering not yet implemented")]
+		// Stage 05 is implemented in the scene-graph pipeline (legacy pipeline may still be incomplete).
+		[Fact]
 		public void ExportSceneGraph_ProducesValidPdf()
 		{
 			CadDocument doc = this.LoadFixture(Fixture);

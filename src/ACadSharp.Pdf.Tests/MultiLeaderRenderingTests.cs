@@ -422,15 +422,16 @@ namespace ACadSharp.Pdf.Tests
 			Assert.Contains("0 -2 l", content);
 		}
 
-		[Fact]
-		public void MultiLeader_DxfParsing_ReadsLeaderAndDoglegBreaks()
-		{
-			string dxf = string.Join('\n', new[]
+			[Fact]
+			public void MultiLeader_DxfParsing_ReadsLeaderAndDoglegBreaks()
 			{
-				"0", "SECTION",
-				"2", "HEADER",
-				"9", "$ACADVER",
-				"1", "AC1027",
+				// net48 doesn't have string.Join(char, string[]) overload.
+				string dxf = string.Join("\n", new[]
+				{
+					"0", "SECTION",
+					"2", "HEADER",
+					"9", "$ACADVER",
+					"1", "AC1027",
 				"0", "ENDSEC",
 				"0", "SECTION",
 				"2", "ENTITIES",

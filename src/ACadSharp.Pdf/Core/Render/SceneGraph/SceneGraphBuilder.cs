@@ -21,6 +21,7 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 		private readonly RenderLog _log;
 		private readonly BlockExpander _blockExpander;
 		private readonly TextLayoutEngine _textLayout;
+		private readonly HatchPatternGenerator _hatchGenerator;
 
 		private readonly struct InsertRenderContext
 		{
@@ -42,11 +43,12 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 		{
 			this._layout = layout ?? throw new ArgumentNullException(nameof(layout));
 			this._configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
-				this._resolver = resolver ?? throw new ArgumentNullException(nameof(resolver));
-				this._log = log ?? throw new ArgumentNullException(nameof(log));
-				this._blockExpander = new BlockExpander(log);
-				this._textLayout = new TextLayoutEngine(layout, configuration, log);
-			}
+			this._resolver = resolver ?? throw new ArgumentNullException(nameof(resolver));
+			this._log = log ?? throw new ArgumentNullException(nameof(log));
+			this._blockExpander = new BlockExpander(log);
+			this._textLayout = new TextLayoutEngine(layout, configuration, log);
+			this._hatchGenerator = new HatchPatternGenerator(configuration, log);
+		}
 
 		public IReadOnlyList<RenderNode> Build(IReadOnlyList<Viewport> viewports, IReadOnlyList<Entity> paperEntities)
 		{
@@ -209,6 +211,8 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 							return buildPoint(point, textScaleToPaper, containingInsert);
 						case IPolyline polyline:
 							return buildPolyline(polyline, styleScaleToPaper, containingInsert);
+						case Hatch hatch:
+							return buildHatch(hatch, styleScaleToPaper, containingInsert);
 						case TextEntity text:
 							return buildText(text, textScaleToPaper, containingInsert);
 						case MText mtext:
@@ -712,18 +716,35 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 			return new PathNode(circle.Handle, segs, stroke, fill: null);
 		}
 
-			private PathNode buildPoint(Point point, double pointScaleToPaper, InsertRenderContext? containingInsert)
+		private RenderNode buildHatch(Hatch hatch, double styleScaleToPaper, InsertRenderContext? containingInsert)
+		{
+			StrokeStyle style = resolveStroke(hatch, styleScaleToPaper, containingInsert);
+			IReadOnlyList<RenderNode> nodes = this._hatchGenerator.Render(hatch, style);
+			if (nodes == null || nodes.Count == 0)
 			{
-				double sizePaper = this._configuration.DotSize;
-				double sizeLocal = pointScaleToPaper <= 0 ? sizePaper : sizePaper / pointScaleToPaper;
-				double diff = sizeLocal / 2;
+				return null;
+			}
 
-				XY p = (XY)point.Location;
-				XY min = new XY(p.X - diff, p.Y - diff);
-				XY max = new XY(p.X + diff, p.Y + diff);
+			if (nodes.Count == 1)
+			{
+				return nodes[0];
+			}
 
-				var fillColor = resolveStroke(point, pointScaleToPaper, containingInsert).Color;
-				var fill = new FillStyle(fillColor);
+			return new GroupNode(hatch.Handle, Matrix4.Identity, nodes);
+		}
+
+		private PathNode buildPoint(Point point, double pointScaleToPaper, InsertRenderContext? containingInsert)
+		{
+			double sizePaper = this._configuration.DotSize;
+			double sizeLocal = pointScaleToPaper <= 0 ? sizePaper : sizePaper / pointScaleToPaper;
+			double diff = sizeLocal / 2;
+
+			XY p = (XY)point.Location;
+			XY min = new XY(p.X - diff, p.Y - diff);
+			XY max = new XY(p.X + diff, p.Y + diff);
+
+			var fillColor = resolveStroke(point, pointScaleToPaper, containingInsert).Color;
+			var fill = new FillStyle(fillColor);
 
 			var rect = rectanglePath(point.Handle, min, max);
 			this._log.Add(point.Handle, point.SubclassMarker, RenderStatus.Rendered, "Rendered as filled rectangle (dot).");

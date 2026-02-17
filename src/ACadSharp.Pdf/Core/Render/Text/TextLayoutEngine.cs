@@ -344,11 +344,12 @@ namespace ACadSharp.Pdf.Core.Render.Text
 			{
 				shear = 0.0;
 			}
-			else
-			{
-				// Avoid exploding matrices for pathological obliques.
-				shear = Math.Clamp(shear, -1e6, 1e6);
-			}
+				else
+				{
+					// Avoid exploding matrices for pathological obliques.
+					if (shear < -1e6) shear = -1e6;
+					else if (shear > 1e6) shear = 1e6;
+				}
 
 			double cos = Math.Cos(rotationRad);
 			double sin = Math.Sin(rotationRad);
