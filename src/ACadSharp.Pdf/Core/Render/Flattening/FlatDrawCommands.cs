@@ -37,19 +37,21 @@ namespace ACadSharp.Pdf.Core.Render.Flattening
 		public string Text { get; }
 		public double FontSizePt { get; }
 		public XY AnchorPdfPt { get; }
-		public double RotationRad { get; }
-		public double ObliqueRad { get; }
-		public double WidthFactor { get; }
+		public double A { get; }
+		public double B { get; }
+		public double C { get; }
+		public double D { get; }
 		public ACadSharp.Color Color { get; }
 
-		public FlatTextCommand(string text, double fontSizePt, XY anchorPdfPt, double rotationRad, double obliqueRad, double widthFactor, ACadSharp.Color color)
+		public FlatTextCommand(string text, double fontSizePt, XY anchorPdfPt, double a, double b, double c, double d, ACadSharp.Color color)
 		{
 			this.Text = text ?? string.Empty;
 			this.FontSizePt = fontSizePt;
 			this.AnchorPdfPt = anchorPdfPt;
-			this.RotationRad = rotationRad;
-			this.ObliqueRad = obliqueRad;
-			this.WidthFactor = widthFactor;
+			this.A = a;
+			this.B = b;
+			this.C = c;
+			this.D = d;
 			this.Color = color;
 		}
 	}

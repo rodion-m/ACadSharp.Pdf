@@ -3,6 +3,7 @@ using ACadSharp.Extensions;
 using ACadSharp.IO;
 using ACadSharp.Objects;
 using ACadSharp.Pdf.Core.Render.Style;
+using ACadSharp.Pdf.Core.Render.Text;
 using ACadSharp.Pdf.Core.Render.Transforms;
 using ACadSharp.Tables;
 using CSMath;
@@ -19,6 +20,7 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 		private readonly PropertyResolver _resolver;
 		private readonly RenderLog _log;
 		private readonly BlockExpander _blockExpander;
+		private readonly TextLayoutEngine _textLayout;
 
 		private readonly struct InsertRenderContext
 		{
@@ -40,10 +42,11 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 		{
 			this._layout = layout ?? throw new ArgumentNullException(nameof(layout));
 			this._configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
-			this._resolver = resolver ?? throw new ArgumentNullException(nameof(resolver));
-			this._log = log ?? throw new ArgumentNullException(nameof(log));
-			this._blockExpander = new BlockExpander(log);
-		}
+				this._resolver = resolver ?? throw new ArgumentNullException(nameof(resolver));
+				this._log = log ?? throw new ArgumentNullException(nameof(log));
+				this._blockExpander = new BlockExpander(log);
+				this._textLayout = new TextLayoutEngine(layout, configuration, log);
+			}
 
 		public IReadOnlyList<RenderNode> Build(IReadOnlyList<Viewport> viewports, IReadOnlyList<Entity> paperEntities)
 		{
@@ -203,6 +206,8 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 							return buildPolyline(polyline, styleScaleToPaper, containingInsert);
 						case TextEntity text:
 							return buildText(text, textScaleToPaper, containingInsert);
+						case MText mtext:
+							return buildMText(mtext, textScaleToPaper, containingInsert);
 					default:
 						this._log.Add(prepared.Handle, prepared.SubclassMarker, RenderStatus.NotImplemented, "Entity not supported in Stage 00 frontend.");
 						this._configuration.Notify($"[{prepared.SubclassMarker}] Drawing not implemented (scene graph pipeline).", NotificationType.NotImplemented);
@@ -327,21 +332,34 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 					renderAtt.Value = def.Value ?? string.Empty;
 				}
 
-				if (string.IsNullOrEmpty(renderAtt.Value))
-				{
-					this._log.Add(renderAtt.Handle, renderAtt.SubclassMarker, RenderStatus.Skipped, "ATTRIB value is empty.");
-					continue;
-				}
+					if (string.IsNullOrEmpty(renderAtt.Value))
+					{
+						if (renderAtt.MText == null)
+						{
+							this._log.Add(renderAtt.Handle, renderAtt.SubclassMarker, RenderStatus.Skipped, "ATTRIB value is empty.");
+							continue;
+						}
+					}
 
-				var node = buildEntityNode(
-					renderAtt,
-					viewport,
-					styleScaleToPaper,
-					textScaleToPaper,
-					childContext,
-					cellTransform,
-					depth,
-					activeBlocks);
+					Entity renderEntity = renderAtt;
+					if (renderAtt.MText != null)
+					{
+						MText mtext = this._textLayout.BuildAttributeMText(renderAtt);
+						if (mtext != null)
+						{
+							renderEntity = mtext;
+						}
+					}
+
+					var node = buildEntityNode(
+						renderEntity,
+						viewport,
+						styleScaleToPaper,
+						textScaleToPaper,
+						childContext,
+						cellTransform,
+						depth,
+						activeBlocks);
 				if (node != null)
 				{
 					nodes.Add(node);
@@ -707,52 +725,28 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 
 		private TextRunNode buildText(TextEntity text, double textScaleToPaper, InsertRenderContext? containingInsert)
 		{
-			// Resolve final font size in PDF points. TEXT height is in current space units.
-			double heightPaperUnits = text.Height * textScaleToPaper;
-			double fontSizePt = TransformHelper.PaperToPdfPoints(heightPaperUnits, this._layout);
-
 			ACadSharp.Color color = resolveStroke(text, textScaleToPaper, containingInsert).Color;
-			// Keep anchor in local space; transforms (viewport/blocks) are applied by the flattener.
-			XY anchorLocal = (XY)text.InsertPoint;
-
-			TextAlignment h = TextAlignment.Left;
-			switch (text.HorizontalAlignment)
+			TextRunNode node = this._textLayout.LayoutText(text, textScaleToPaper, color);
+			if (node == null)
 			{
-				case TextHorizontalAlignment.Center:
-					h = TextAlignment.Center;
-					break;
-				case TextHorizontalAlignment.Right:
-					h = TextAlignment.Right;
-					break;
+				return null;
 			}
 
-			TextVAlignment v = TextVAlignment.Baseline;
-			switch (text.VerticalAlignment)
+			this._log.Add(text.Handle, text.SubclassMarker, RenderStatus.Rendered, "Rendered as TextRun.");
+			return node;
+		}
+
+		private RenderNode buildMText(MText mtext, double textScaleToPaper, InsertRenderContext? containingInsert)
+		{
+			ACadSharp.Color color = resolveStroke(mtext, textScaleToPaper, containingInsert).Color;
+			RenderNode node = this._textLayout.LayoutMText(mtext, textScaleToPaper, color);
+			if (node == null)
 			{
-				case TextVerticalAlignmentType.Bottom:
-					v = TextVAlignment.Bottom;
-					break;
-				case TextVerticalAlignmentType.Middle:
-					v = TextVAlignment.Middle;
-					break;
-				case TextVerticalAlignmentType.Top:
-					v = TextVAlignment.Top;
-					break;
+				return null;
 			}
 
-			this._log.Add(text.Handle, text.SubclassMarker, RenderStatus.Rendered, "Rendered as TextRun (simple).");
-			return new TextRunNode(
-				text.Handle,
-				text.Value ?? string.Empty,
-				fontName: text.Style?.Name ?? "F1",
-				fontSizePt: fontSizePt,
-				anchorPt: anchorLocal,
-				rotationRad: text.Rotation,
-				obliqueRad: text.ObliqueAngle,
-				widthFactor: text.WidthFactor <= 0 ? 1.0 : text.WidthFactor,
-				color: color,
-				hAlign: h,
-				vAlign: v);
+			this._log.Add(mtext.Handle, mtext.SubclassMarker, RenderStatus.Rendered, "Rendered as MTEXT runs.");
+			return node;
 		}
 
 		private static PathNode rectanglePath(ulong handle, XY min, XY max)

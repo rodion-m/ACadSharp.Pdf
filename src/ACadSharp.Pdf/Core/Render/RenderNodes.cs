@@ -1,3 +1,4 @@
+using ACadSharp.Entities;
 using CSMath;
 using System;
 using System.Collections.Generic;
@@ -41,11 +42,13 @@ namespace ACadSharp.Pdf.Core.Render
 
 		public XY AnchorPt { get; }
 
-		public double RotationRad { get; }
+		public double A { get; }
 
-		public double ObliqueRad { get; }
+		public double B { get; }
 
-		public double WidthFactor { get; }
+		public double C { get; }
+
+		public double D { get; }
 
 		public ACadSharp.Color Color { get; }
 
@@ -59,24 +62,32 @@ namespace ACadSharp.Pdf.Core.Render
 			string fontName,
 			double fontSizePt,
 			XY anchorPt,
-			double rotationRad,
-			double obliqueRad,
-			double widthFactor,
+			double a,
+			double b,
+			double c,
+			double d,
 			ACadSharp.Color color,
 			TextAlignment hAlign,
-			TextVAlignment vAlign)
+			TextVerticalAlignmentType vAlign)
 			: base(sourceHandle)
 		{
 			this.Text = text ?? string.Empty;
 			this.FontName = fontName ?? string.Empty;
 			this.FontSizePt = fontSizePt;
 			this.AnchorPt = anchorPt;
-			this.RotationRad = rotationRad;
-			this.ObliqueRad = obliqueRad;
-			this.WidthFactor = widthFactor;
+			this.A = a;
+			this.B = b;
+			this.C = c;
+			this.D = d;
 			this.Color = color;
 			this.HAlign = hAlign;
-			this.VAlign = vAlign;
+			this.VAlign = vAlign switch
+			{
+				TextVerticalAlignmentType.Bottom => TextVAlignment.Bottom,
+				TextVerticalAlignmentType.Middle => TextVAlignment.Middle,
+				TextVerticalAlignmentType.Top => TextVAlignment.Top,
+				_ => TextVAlignment.Baseline,
+			};
 		}
 	}
 

@@ -102,18 +102,7 @@ namespace ACadSharp.Pdf.Core.Render.Pdf
 			sb.Append(' ');
 			sb.AppendLine(PdfKey.TypeFont);
 
-			// Text matrix: R * ShearX(tan(oblique)) * Scale(widthFactor, 1) + translation.
-			double angle = cmd.RotationRad;
-			double cos = Math.Cos(angle);
-			double sin = Math.Sin(angle);
-
-			double shear = Math.Tan(cmd.ObliqueRad);
-			double a = cos * cmd.WidthFactor;
-			double b = sin * cmd.WidthFactor;
-			double c = (-sin) + cos * shear;
-			double d = (cos) + sin * shear;
-
-			sb.AppendLine($"{toPdf(a)} {toPdf(b)} {toPdf(c)} {toPdf(d)} {toPdf(cmd.AnchorPdfPt.X)} {toPdf(cmd.AnchorPdfPt.Y)} {PdfKey.TextMatrix}");
+			sb.AppendLine($"{toPdf(cmd.A)} {toPdf(cmd.B)} {toPdf(cmd.C)} {toPdf(cmd.D)} {toPdf(cmd.AnchorPdfPt.X)} {toPdf(cmd.AnchorPdfPt.Y)} {PdfKey.TextMatrix}");
 
 			sb.AppendLine(strokeColor(cmd.Color));
 			sb.AppendLine(fillColor(cmd.Color));

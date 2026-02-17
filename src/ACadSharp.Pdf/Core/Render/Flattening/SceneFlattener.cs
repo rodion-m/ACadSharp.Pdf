@@ -70,9 +70,10 @@ namespace ACadSharp.Pdf.Core.Render.Flattening
 							text: text.Text,
 							fontSizePt: text.FontSizePt,
 							anchorPdfPt: anchorPdf,
-							rotationRad: text.RotationRad,
-							obliqueRad: text.ObliqueRad,
-							widthFactor: text.WidthFactor,
+							a: text.A,
+							b: text.B,
+							c: text.C,
+							d: text.D,
 							color: text.Color));
 						break;
 					}

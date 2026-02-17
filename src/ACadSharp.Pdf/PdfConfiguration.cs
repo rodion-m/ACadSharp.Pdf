@@ -78,6 +78,11 @@ namespace ACadSharp.Pdf
 		/// </summary>
 		public Core.Render.RenderLog LastRenderLog { get; internal set; } = null;
 
+		/// <summary>
+		/// Optional SHX-to-TTF font substitution overrides used by the Stage 02 text layout engine.
+		/// </summary>
+		public Dictionary<string, string> ShxFontSubstitutions { get; } = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
 		public Dictionary<LineWeightType, double> LineWeightValues { get; set; } = new();
 
 		public double GetLineWeightValue(LineWeightType lineWeight)
