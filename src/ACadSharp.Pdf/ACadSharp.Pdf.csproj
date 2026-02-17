@@ -39,7 +39,11 @@
 	</ItemGroup>
 
 	<ItemGroup>
-	  <PackageReference Include="Svg" Version="3.4.7" />
+		<PackageReference Include="Svg.Skia" Version="3.4.1" />
+		<PackageReference Include="SkiaSharp" Version="3.119.2" />
+		<PackageReference Include="SkiaSharp.NativeAssets.Linux" Version="3.119.2" />
+		<PackageReference Include="SkiaSharp.NativeAssets.macOS" Version="3.119.2" />
+		<PackageReference Include="SkiaSharp.NativeAssets.Win32" Version="3.119.2" />
 	</ItemGroup>
 
 	<Import Project="..\ACadSharp\src\CSUtilities\CSUtilities\CSUtilities.projitems" Label="Shared" />
