@@ -43,6 +43,9 @@ namespace ACadSharp.Pdf.Core.Render.Pdf
 					case FlatTextCommand text:
 						serializeText(sb, text);
 						break;
+					case FlatImageCommand image:
+						serializeImage(sb, image);
+						break;
 				}
 			}
 
@@ -108,6 +111,40 @@ namespace ACadSharp.Pdf.Core.Render.Pdf
 			sb.AppendLine(fillColor(cmd.Color));
 			sb.AppendLine($"({escapePdfString(cmd.Text)}) {PdfKey.TextString}");
 			sb.AppendLine(PdfKey.BasicTextEnd);
+		}
+
+		private void serializeImage(StringBuilder sb, FlatImageCommand cmd)
+		{
+			if (cmd == null || cmd.Rgb24Data == null || cmd.Rgb24Data.Length == 0)
+			{
+				return;
+			}
+
+			if (cmd.SourceWidthPixels <= 0 || cmd.SourceHeightPixels <= 0)
+			{
+				return;
+			}
+
+			if (cmd.DisplayWidth <= 0 || cmd.DisplayHeight <= 0)
+			{
+				return;
+			}
+
+			sb.AppendLine(PdfKey.StackStart);
+			sb.AppendLine($"{toPdf(cmd.A)} {toPdf(cmd.B)} {toPdf(cmd.C)} {toPdf(cmd.D)} {toPdf(cmd.E)} {toPdf(cmd.F)} {PdfKey.CurrentMatrix}");
+			sb.AppendLine($"{toPdf(cmd.DisplayWidth)} 0 0 {toPdf(cmd.DisplayHeight)} 0 0 {PdfKey.CurrentMatrix}");
+
+			sb.AppendLine("BI");
+			sb.AppendLine($"/W {cmd.SourceWidthPixels}");
+			sb.AppendLine($"/H {cmd.SourceHeightPixels}");
+			sb.AppendLine("/BPC 8");
+			sb.AppendLine("/CS /RGB");
+			sb.AppendLine("/F /ASCIIHexDecode");
+			sb.AppendLine("ID");
+			appendAsciiHexData(sb, cmd.Rgb24Data);
+			sb.AppendLine(">");
+			sb.AppendLine("EI");
+			sb.AppendLine(PdfKey.StackEnd);
 		}
 
 		private void appendPath(StringBuilder sb, IReadOnlyList<PathSegment> segments)
@@ -211,6 +248,37 @@ namespace ACadSharp.Pdf.Core.Render.Pdf
 			}
 
 			return escaped.ToString();
+		}
+
+		private static void appendAsciiHexData(StringBuilder sb, byte[] data)
+		{
+			if (data == null || data.Length == 0)
+			{
+				return;
+			}
+
+			const int lineChars = 128;
+			const string hex = "0123456789ABCDEF";
+
+			int chars = 0;
+			for (int i = 0; i < data.Length; i++)
+			{
+				byte value = data[i];
+				sb.Append(hex[value >> 4]);
+				sb.Append(hex[value & 0x0F]);
+				chars += 2;
+
+				if (chars >= lineChars)
+				{
+					sb.AppendLine();
+					chars = 0;
+				}
+			}
+
+			if (chars != 0)
+			{
+				sb.AppendLine();
+			}
 		}
 
 		private string toPdf(double value)

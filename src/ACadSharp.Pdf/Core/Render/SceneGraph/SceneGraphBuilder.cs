@@ -9,6 +9,7 @@ using ACadSharp.Tables;
 using CSMath;
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 
 namespace ACadSharp.Pdf.Core.Render.SceneGraph
@@ -22,6 +23,7 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 		private readonly BlockExpander _blockExpander;
 		private readonly TextLayoutEngine _textLayout;
 		private readonly HatchPatternGenerator _hatchGenerator;
+		private readonly UnderlayRasterCache _underlayRasterCache;
 
 		private readonly struct InsertRenderContext
 		{
@@ -48,6 +50,7 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 			this._blockExpander = new BlockExpander(log);
 			this._textLayout = new TextLayoutEngine(layout, configuration, log);
 			this._hatchGenerator = new HatchPatternGenerator(configuration, log);
+			this._underlayRasterCache = new UnderlayRasterCache(configuration);
 		}
 
 		public IReadOnlyList<RenderNode> Build(IReadOnlyList<Viewport> viewports, IReadOnlyList<Entity> paperEntities)
@@ -213,6 +216,10 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 							return buildPolyline(polyline, styleScaleToPaper, containingInsert);
 						case Hatch hatch:
 							return buildHatch(hatch, styleScaleToPaper, containingInsert);
+						case RasterImage rasterImage:
+							return buildRasterImage(rasterImage);
+						case PdfUnderlay pdfUnderlay:
+							return buildPdfUnderlay(pdfUnderlay, styleScaleToPaper);
 						case TextEntity text:
 							return buildText(text, textScaleToPaper, containingInsert);
 						case MText mtext:
@@ -438,8 +445,22 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 		private static Entity cloneWithTransform(Entity entity, Matrix4 transform)
 		{
 			Entity clone = entity.CloneTyped();
+			if (clone is CadWipeoutBase wipeout)
+			{
+				wipeout.InsertPoint = transform * wipeout.InsertPoint;
+				wipeout.UVector = transformDirection(transform, wipeout.UVector);
+				wipeout.VVector = transformDirection(transform, wipeout.VVector);
+				return clone;
+			}
+
 			clone.ApplyTransform(new Transform(transform));
 			return clone;
+		}
+
+		private static XYZ transformDirection(Matrix4 matrix, XYZ vector)
+		{
+			XYZM r = matrix * new XYZM(vector.X, vector.Y, vector.Z, 0.0);
+			return new XYZ(r.X, r.Y, r.Z);
 		}
 
 			private StrokeStyle resolveStroke(Entity entity, double styleScaleToPaper, InsertRenderContext? containingInsert)
@@ -731,6 +752,292 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 			}
 
 			return new GroupNode(hatch.Handle, Matrix4.Identity, nodes);
+		}
+
+		private RenderNode buildRasterImage(RasterImage image)
+		{
+			if (image == null)
+			{
+				return null;
+			}
+
+			if (!image.ShowImage)
+			{
+				this._log.Add(image.Handle, image.SubclassMarker, RenderStatus.Skipped, "IMAGE hidden by display flags.");
+				return null;
+			}
+
+			if (image.Definition == null || string.IsNullOrWhiteSpace(image.Definition.FileName))
+			{
+				return failExternalReference(image.Handle, image.SubclassMarker, "IMAGE has no IMAGEDEF file reference.");
+			}
+
+			if (isDegenerate(image.UVector) || isDegenerate(image.VVector))
+			{
+				this._log.Add(image.Handle, image.SubclassMarker, RenderStatus.Skipped, "IMAGE has degenerate U/V vectors.");
+				return null;
+			}
+
+			if (!this._underlayRasterCache.TryLoadRasterImage(image.Definition.FileName, out var raster, out string resolvedPath, out string reason))
+			{
+				return failExternalReference(image.Handle, image.SubclassMarker, $"IMAGE load failed: {reason}");
+			}
+
+			double displayWidth = image.Size.X > 0 ? image.Size.X : raster.Width;
+			double displayHeight = image.Size.Y > 0 ? image.Size.Y : raster.Height;
+			if (displayWidth <= 0 || displayHeight <= 0)
+			{
+				this._log.Add(image.Handle, image.SubclassMarker, RenderStatus.Skipped, "IMAGE has invalid display dimensions.");
+				return null;
+			}
+
+			if (image.Flags.HasFlag(ImageDisplayFlags.TransparencyIsOn))
+			{
+				this._log.Add(image.Handle, image.SubclassMarker, RenderStatus.Rendered, "IMAGE transparency flag present; alpha is composited onto white (no soft mask support yet).");
+			}
+
+			byte[] rgb24 = UnderlayRasterCache.ApplyRasterImageAdjustments(raster.Rgb24Data, image.Brightness, image.Contrast, image.Fade);
+			RenderNode leaf = new ImageNode(image.Handle, rgb24, raster.Width, raster.Height, displayWidth, displayHeight);
+
+			PathNode clipPath = buildRasterImageClipPath(image, displayWidth, displayHeight);
+			if (clipPath != null)
+			{
+				leaf = new ClipNode(image.Handle, clipPath, new[] { leaf });
+			}
+
+			Matrix4 imageTransform = TransformHelper.ImagePixelToWcs(image.InsertPoint, image.UVector, image.VVector);
+			this._log.Add(image.Handle, image.SubclassMarker, RenderStatus.Rendered, $"Rendered IMAGE from '{resolvedPath}'.");
+			return new GroupNode(image.Handle, imageTransform, new[] { leaf });
+		}
+
+		private RenderNode buildPdfUnderlay(PdfUnderlay underlay, double geometricScaleToPaper)
+		{
+			if (underlay == null)
+			{
+				return null;
+			}
+
+			if (!underlay.Flags.HasFlag(UnderlayDisplayFlags.ShowUnderlay))
+			{
+				this._log.Add(underlay.Handle, underlay.SubclassMarker, RenderStatus.Skipped, "PDFUNDERLAY hidden by display flags.");
+				return null;
+			}
+
+			if (underlay.Definition == null || string.IsNullOrWhiteSpace(underlay.Definition.File))
+			{
+				return failExternalReference(underlay.Handle, underlay.SubclassMarker, "PDFUNDERLAY has no PDF definition file reference.");
+			}
+
+			int pageIndex = parseUnderlayPageIndex(underlay.Definition.Page);
+			int dpi = determineUnderlayDpi(geometricScaleToPaper);
+
+			if (!this._underlayRasterCache.TryRasterizePdf(underlay.Definition.File, pageIndex, dpi, out var raster, out string resolvedPath, out string reason))
+			{
+				return failExternalReference(underlay.Handle, underlay.SubclassMarker, $"PDFUNDERLAY rasterization failed: {reason}");
+			}
+
+			if (raster.Width <= 0 || raster.Height <= 0)
+			{
+				this._log.Add(underlay.Handle, underlay.SubclassMarker, RenderStatus.Skipped, "PDFUNDERLAY rasterized to invalid dimensions.");
+				return null;
+			}
+
+			double displayWidth = raster.Width;
+			double displayHeight = raster.Height;
+			bool monochrome = underlay.Flags.HasFlag(UnderlayDisplayFlags.Monochrome);
+			byte[] rgb24 = UnderlayRasterCache.ApplyUnderlayAdjustments(raster.Rgb24Data, underlay.Contrast, underlay.Fade, monochrome);
+			RenderNode leaf = new ImageNode(underlay.Handle, rgb24, raster.Width, raster.Height, displayWidth, displayHeight);
+
+			PathNode clipPath = buildPdfUnderlayClipPath(underlay, displayWidth, displayHeight);
+			if (clipPath != null)
+			{
+				leaf = new ClipNode(underlay.Handle, clipPath, new[] { leaf });
+			}
+
+			Matrix4 underlayTransform = buildPdfUnderlayPixelTransform(underlay, displayWidth, displayHeight);
+			this._log.Add(underlay.Handle, underlay.SubclassMarker, RenderStatus.Rendered, $"Rendered PDFUNDERLAY from '{resolvedPath}' page {pageIndex + 1}.");
+			return new GroupNode(underlay.Handle, underlayTransform, new[] { leaf });
+		}
+
+		private int determineUnderlayDpi(double geometricScaleToPaper)
+		{
+			int baseDpi = this._configuration.PdfUnderlayDpi;
+			if (baseDpi <= 0)
+			{
+				baseDpi = 150;
+			}
+
+			double scale = geometricScaleToPaper <= 0 ? 1.0 : geometricScaleToPaper;
+			int dpi = (int)Math.Round(baseDpi * scale);
+			return clampInt(dpi, 72, 600);
+		}
+
+		private static int clampInt(int value, int min, int max)
+		{
+			if (value < min) return min;
+			if (value > max) return max;
+			return value;
+		}
+
+		private RenderNode failExternalReference(ulong handle, string subclassMarker, string reason)
+		{
+			if (this._configuration.SkipMissingImages)
+			{
+				this._log.Add(handle, subclassMarker, RenderStatus.Skipped, reason);
+				return null;
+			}
+
+			throw new FileNotFoundException(reason);
+		}
+
+		private static bool isDegenerate(XYZ vector)
+		{
+			const double eps = 1e-12;
+			return vector.GetLength() <= eps;
+		}
+
+		private static int parseUnderlayPageIndex(string page)
+		{
+			if (string.IsNullOrWhiteSpace(page))
+			{
+				return 0;
+			}
+
+			if (int.TryParse(page, out int parsed) && parsed > 0)
+			{
+				return parsed - 1;
+			}
+
+			return 0;
+		}
+
+		private Matrix4 buildPdfUnderlayPixelTransform(PdfUnderlay underlay, double displayWidth, double displayHeight)
+		{
+			XYZ normal = underlay.Normal == XYZ.Zero ? XYZ.AxisZ : underlay.Normal;
+			Matrix4 ocsToWcs = TransformHelper.OcsToWcs(normal);
+
+			double width = displayWidth <= 0.0 ? 1.0 : displayWidth;
+			double height = displayHeight <= 0.0 ? 1.0 : displayHeight;
+
+			double ux = underlay.XScale / width;
+			double uy = underlay.YScale / height;
+
+			double cos = Math.Cos(underlay.Rotation);
+			double sin = Math.Sin(underlay.Rotation);
+
+			XYZ uOcs = new XYZ(cos * ux, sin * ux, 0.0);
+			XYZ vOcs = new XYZ(-sin * uy, cos * uy, 0.0);
+
+			XYZ uWcs = ocsToWcs * uOcs;
+			XYZ vWcs = ocsToWcs * vOcs;
+
+			return TransformHelper.ImagePixelToWcs(underlay.InsertPoint, uWcs, vWcs);
+		}
+
+		private PathNode buildRasterImageClipPath(RasterImage image, double fullWidth, double fullHeight)
+		{
+			if (!image.ClippingState || !image.Flags.HasFlag(ImageDisplayFlags.UseClippingBoundary))
+			{
+				return null;
+			}
+
+			if (image.ClipMode == ClipMode.Outside)
+			{
+				this._log.Add(image.Handle, image.SubclassMarker, RenderStatus.Rendered, "IMAGE outside clipping mode is not supported; rendering unclipped.");
+				return null;
+			}
+
+			List<XY> clipVertices = image.ClipBoundaryVertices;
+			if (clipVertices == null || clipVertices.Count == 0)
+			{
+				return rectanglePath(image.Handle, new XY(-0.5, -0.5), new XY(fullWidth - 0.5, fullHeight - 0.5));
+			}
+
+			if (image.ClipType == ClipType.Rectangular)
+			{
+				if (clipVertices.Count < 2)
+				{
+					return null;
+				}
+
+				double minX = Math.Min(clipVertices[0].X, clipVertices[1].X);
+				double minY = Math.Min(clipVertices[0].Y, clipVertices[1].Y);
+				double maxX = Math.Max(clipVertices[0].X, clipVertices[1].X);
+				double maxY = Math.Max(clipVertices[0].Y, clipVertices[1].Y);
+				return rectanglePath(image.Handle, new XY(minX, minY), new XY(maxX, maxY));
+			}
+
+			if (clipVertices.Count < 3)
+			{
+				return null;
+			}
+
+			return closedPolygonPath(image.Handle, clipVertices);
+		}
+
+		private PathNode buildPdfUnderlayClipPath(PdfUnderlay underlay, double displayWidth, double displayHeight)
+		{
+			if (!underlay.Flags.HasFlag(UnderlayDisplayFlags.ClippingOn))
+			{
+				return null;
+			}
+
+			if (!underlay.Flags.HasFlag(UnderlayDisplayFlags.ClipInsideMode))
+			{
+				this._log.Add(underlay.Handle, underlay.SubclassMarker, RenderStatus.Rendered, "PDFUNDERLAY outside clipping mode is not supported; rendering unclipped.");
+				return null;
+			}
+
+			if (underlay.ClipBoundaryVertices == null || underlay.ClipBoundaryVertices.Count == 0)
+			{
+				return null;
+			}
+
+			double sx = Math.Abs(underlay.XScale) <= 1e-12 ? 1.0 : underlay.XScale;
+			double sy = Math.Abs(underlay.YScale) <= 1e-12 ? 1.0 : underlay.YScale;
+
+			var points = new List<XY>(underlay.ClipBoundaryVertices.Count);
+			foreach (XY vertex in underlay.ClipBoundaryVertices)
+			{
+				points.Add(new XY(vertex.X / sx * displayWidth, vertex.Y / sy * displayHeight));
+			}
+
+			if (points.Count == 2)
+			{
+				double minX = Math.Min(points[0].X, points[1].X);
+				double minY = Math.Min(points[0].Y, points[1].Y);
+				double maxX = Math.Max(points[0].X, points[1].X);
+				double maxY = Math.Max(points[0].Y, points[1].Y);
+				return rectanglePath(underlay.Handle, new XY(minX, minY), new XY(maxX, maxY));
+			}
+
+			if (points.Count < 3)
+			{
+				return null;
+			}
+
+			return closedPolygonPath(underlay.Handle, points);
+		}
+
+		private static PathNode closedPolygonPath(ulong handle, IReadOnlyList<XY> points)
+		{
+			if (points == null || points.Count < 3)
+			{
+				return null;
+			}
+
+			var segments = new List<PathSegment>(points.Count + 1)
+			{
+				new MoveTo(points[0]),
+			};
+
+			for (int i = 1; i < points.Count; i++)
+			{
+				segments.Add(new LineTo(points[i]));
+			}
+			segments.Add(new ClosePath());
+
+			return new PathNode(handle, segments, stroke: null, fill: null);
 		}
 
 		private PathNode buildPoint(Point point, double pointScaleToPaper, InsertRenderContext? containingInsert)

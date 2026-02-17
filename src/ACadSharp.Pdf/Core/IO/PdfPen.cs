@@ -3,6 +3,7 @@ using ACadSharp.Extensions;
 using ACadSharp.IO;
 using ACadSharp.Objects;
 using ACadSharp.Pdf.Extensions;
+using ACadSharp.Pdf.Core.Render.SceneGraph;
 using ACadSharp.Tables;
 using CSMath;
 using System;
@@ -35,10 +36,13 @@ namespace ACadSharp.Pdf.Core.IO
 
 		private readonly StringBuilder _sb = new();
 
+		private readonly UnderlayRasterCache _underlayRasterCache;
+
 		public PdfPen(Layout layout, PdfConfiguration configuration)
 		{
 			this._layout = layout;
 			this._configuration = configuration;
+			this._underlayRasterCache = new UnderlayRasterCache(configuration);
 		}
 
 		public void DrawEntity(Entity entity)
@@ -77,6 +81,12 @@ namespace ACadSharp.Pdf.Core.IO
 					break;
 				case Viewport viewport:
 					this.drawViewport(viewport);
+					break;
+				case RasterImage image:
+					this.drawRasterImage(image, transform);
+					break;
+				case PdfUnderlay underlay:
+					this.drawPdfUnderlay(underlay, transform);
 					break;
 				default:
 					this._configuration.Notify($"[{entity.SubclassMarker}] Drawing not implemented.", NotificationType.NotImplemented);
@@ -318,6 +328,308 @@ namespace ACadSharp.Pdf.Core.IO
 			}
 
 			this._sb.AppendLine(PdfKey.StackEnd);
+		}
+
+		private void drawRasterImage(RasterImage image, Transform transform)
+		{
+			if (image == null)
+			{
+				return;
+			}
+
+			if (!image.ShowImage)
+			{
+				return;
+			}
+
+			if (image.Definition == null || string.IsNullOrWhiteSpace(image.Definition.FileName))
+			{
+				this._configuration.Notify("[IMAGE] Missing IMAGEDEF file reference.", NotificationType.Warning);
+				return;
+			}
+
+			if (!this._underlayRasterCache.TryLoadRasterImage(image.Definition.FileName, out var raster, out _, out string reason))
+			{
+				if (!this._configuration.SkipMissingImages)
+				{
+					this._configuration.Notify($"[IMAGE] Load failed: {reason}", NotificationType.Warning);
+				}
+				return;
+			}
+
+			double displayWidth = image.Size.X > 0 ? image.Size.X : raster.Width;
+			double displayHeight = image.Size.Y > 0 ? image.Size.Y : raster.Height;
+			if (displayWidth <= 0 || displayHeight <= 0)
+			{
+				return;
+			}
+
+			XYZ insert = transform.ApplyTransform(image.InsertPoint);
+			XYZ u = transformDirection(transform, image.UVector);
+			XYZ v = transformDirection(transform, image.VVector);
+
+			byte[] rgb24 = UnderlayRasterCache.ApplyRasterImageAdjustments(raster.Rgb24Data, image.Brightness, image.Contrast, image.Fade);
+
+			this._sb.AppendLine(PdfKey.StackStart);
+
+			if (image.ClippingState && image.Flags.HasFlag(ImageDisplayFlags.UseClippingBoundary) && image.ClipMode == ClipMode.Inside)
+			{
+				appendImageClipPath(image, insert, u, v, displayWidth, displayHeight);
+			}
+
+			appendConcatMatrix(
+				a: u.X * displayWidth, b: u.Y * displayWidth,
+				c: v.X * displayHeight, d: v.Y * displayHeight,
+				e: insert.X, f: insert.Y);
+
+			appendInlineRgbImage(raster.Width, raster.Height, rgb24);
+			this._sb.AppendLine(PdfKey.StackEnd);
+		}
+
+		private void drawPdfUnderlay(PdfUnderlay underlay, Transform transform)
+		{
+			if (underlay == null)
+			{
+				return;
+			}
+
+			if (!underlay.Flags.HasFlag(UnderlayDisplayFlags.ShowUnderlay))
+			{
+				return;
+			}
+
+			if (underlay.Definition == null || string.IsNullOrWhiteSpace(underlay.Definition.File))
+			{
+				this._configuration.Notify("[PDFUNDERLAY] Missing underlay file reference.", NotificationType.Warning);
+				return;
+			}
+
+			int pageIndex = 0;
+			if (!string.IsNullOrWhiteSpace(underlay.Definition.Page) && int.TryParse(underlay.Definition.Page, out int parsed) && parsed > 0)
+			{
+				pageIndex = parsed - 1;
+			}
+
+			int dpi = this._configuration.PdfUnderlayDpi <= 0 ? 150 : this._configuration.PdfUnderlayDpi;
+			if (!this._underlayRasterCache.TryRasterizePdf(underlay.Definition.File, pageIndex, dpi, out var raster, out _, out string reason))
+			{
+				if (!this._configuration.SkipMissingImages)
+				{
+					this._configuration.Notify($"[PDFUNDERLAY] Rasterization failed: {reason}", NotificationType.Warning);
+				}
+				return;
+			}
+
+			var u = (PdfUnderlay)underlay.CloneTyped();
+			u.ApplyTransform(transform);
+
+			bool monochrome = u.Flags.HasFlag(UnderlayDisplayFlags.Monochrome);
+			byte[] rgb24 = UnderlayRasterCache.ApplyUnderlayAdjustments(raster.Rgb24Data, u.Contrast, u.Fade, monochrome);
+
+			Matrix4 ocsToWcs = CSMath.Matrix4.GetArbitraryAxis(u.Normal == XYZ.Zero ? XYZ.AxisZ : u.Normal);
+
+			double cos = Math.Cos(u.Rotation);
+			double sin = Math.Sin(u.Rotation);
+
+			XYZ axisXOcs = new XYZ(cos * u.XScale, sin * u.XScale, 0.0);
+			XYZ axisYOcs = new XYZ(-sin * u.YScale, cos * u.YScale, 0.0);
+
+			XYZ axisX = ocsToWcs * axisXOcs;
+			XYZ axisY = ocsToWcs * axisYOcs;
+
+			this._sb.AppendLine(PdfKey.StackStart);
+
+			if (u.Flags.HasFlag(UnderlayDisplayFlags.ClippingOn) && u.Flags.HasFlag(UnderlayDisplayFlags.ClipInsideMode))
+			{
+				appendUnderlayClipPath(u, ocsToWcs);
+			}
+
+			appendConcatMatrix(
+				a: axisX.X, b: axisX.Y,
+				c: axisY.X, d: axisY.Y,
+				e: u.InsertPoint.X, f: u.InsertPoint.Y);
+
+			appendInlineRgbImage(raster.Width, raster.Height, rgb24);
+			this._sb.AppendLine(PdfKey.StackEnd);
+		}
+
+		private static XYZ transformDirection(Transform transform, XYZ vector)
+		{
+			Matrix4 m = transform.Matrix;
+			XYZM r = m * new XYZM(vector.X, vector.Y, vector.Z, 0.0);
+			return new XYZ(r.X, r.Y, r.Z);
+		}
+
+		private void appendUnderlayClipPath(PdfUnderlay underlay, Matrix4 ocsToWcs)
+		{
+			if (underlay.ClipBoundaryVertices == null || underlay.ClipBoundaryVertices.Count < 2)
+			{
+				return;
+			}
+
+			var vertices = underlay.ClipBoundaryVertices;
+			List<XY> pts = new List<XY>();
+
+			double cos = Math.Cos(underlay.Rotation);
+			double sin = Math.Sin(underlay.Rotation);
+
+			foreach (var v in vertices)
+			{
+				double xr = cos * v.X - sin * v.Y;
+				double yr = sin * v.X + cos * v.Y;
+				XYZ w = ocsToWcs * new XYZ(xr, yr, 0.0);
+				pts.Add(new XY(underlay.InsertPoint.X + w.X, underlay.InsertPoint.Y + w.Y));
+			}
+
+			if (pts.Count == 2)
+			{
+				appendRectanglePath(pts[0], pts[1]);
+			}
+			else if (pts.Count >= 3)
+			{
+				appendPolygonPath(pts);
+			}
+		}
+
+		private void appendImageClipPath(RasterImage image, XYZ insert, XYZ u, XYZ v, double displayWidth, double displayHeight)
+		{
+			List<XY> clipVertices = image.ClipBoundaryVertices;
+			if (clipVertices == null || clipVertices.Count == 0)
+			{
+				clipVertices = new List<XY>
+				{
+					new XY(-0.5, -0.5),
+					new XY(displayWidth - 0.5, displayHeight - 0.5),
+				};
+			}
+
+			List<XY> world = new List<XY>();
+
+			if (image.ClipType == ClipType.Rectangular && clipVertices.Count >= 2)
+			{
+				XY a = clipVertices[0];
+				XY b = clipVertices[1];
+
+				double minX = Math.Min(a.X, b.X);
+				double minY = Math.Min(a.Y, b.Y);
+				double maxX = Math.Max(a.X, b.X);
+				double maxY = Math.Max(a.Y, b.Y);
+
+				world.Add(toWorld(insert, u, v, minX, minY));
+				world.Add(toWorld(insert, u, v, maxX, minY));
+				world.Add(toWorld(insert, u, v, maxX, maxY));
+				world.Add(toWorld(insert, u, v, minX, maxY));
+			}
+			else if (clipVertices.Count >= 3)
+			{
+				foreach (var cv in clipVertices)
+				{
+					world.Add(toWorld(insert, u, v, cv.X, cv.Y));
+				}
+			}
+
+			if (world.Count == 2)
+			{
+				appendRectanglePath(world[0], world[1]);
+				return;
+			}
+
+			if (world.Count >= 3)
+			{
+				appendPolygonPath(world);
+				return;
+			}
+		}
+
+		private static XY toWorld(XYZ insert, XYZ u, XYZ v, double px, double py)
+		{
+			return new XY(
+				insert.X + (px * u.X) + (py * v.X),
+				insert.Y + (px * u.Y) + (py * v.Y));
+		}
+
+		private void appendRectanglePath(XY p1, XY p2)
+		{
+			double minX = Math.Min(p1.X, p2.X);
+			double minY = Math.Min(p1.Y, p2.Y);
+			double maxX = Math.Max(p1.X, p2.X);
+			double maxY = Math.Max(p1.Y, p2.Y);
+
+			this.appendXY(minX, minY, PdfKey.BeginPath);
+			this.appendXY(maxX, minY, PdfKey.Line);
+			this.appendXY(maxX, maxY, PdfKey.Line);
+			this.appendXY(minX, maxY, PdfKey.Line);
+			this._sb.AppendLine($"h {PdfKey.ClippingPath} n");
+		}
+
+		private void appendPolygonPath(IReadOnlyList<XY> pts)
+		{
+			if (pts == null || pts.Count < 3)
+			{
+				return;
+			}
+
+			this.appendXY(pts[0], PdfKey.BeginPath);
+			for (int i = 1; i < pts.Count; i++)
+			{
+				this.appendXY(pts[i], PdfKey.Line);
+			}
+			this._sb.AppendLine($"h {PdfKey.ClippingPath} n");
+		}
+
+		private void appendConcatMatrix(double a, double b, double c, double d, double e, double f)
+		{
+			this._sb.AppendLine($"{this.toPdfDouble(a)} {this.toPdfDouble(b)} {this.toPdfDouble(c)} {this.toPdfDouble(d)} {this.toPdfDouble(e)} {this.toPdfDouble(f)} {PdfKey.CurrentMatrix}");
+		}
+
+		private void appendInlineRgbImage(int width, int height, byte[] rgb24)
+		{
+			if (width <= 0 || height <= 0 || rgb24 == null || rgb24.Length == 0)
+			{
+				return;
+			}
+
+			this._sb.AppendLine("BI");
+			this._sb.AppendLine($"/W {width}");
+			this._sb.AppendLine($"/H {height}");
+			this._sb.AppendLine("/BPC 8");
+			this._sb.AppendLine("/CS /RGB");
+			this._sb.AppendLine("/F /ASCIIHexDecode");
+			this._sb.AppendLine("ID");
+			appendAsciiHexData(this._sb, rgb24);
+			this._sb.AppendLine(">");
+			this._sb.AppendLine("EI");
+		}
+
+		private static void appendAsciiHexData(StringBuilder sb, byte[] data)
+		{
+			if (data == null || data.Length == 0)
+			{
+				return;
+			}
+
+			const int lineChars = 128;
+			const string hex = "0123456789ABCDEF";
+
+			int chars = 0;
+			for (int i = 0; i < data.Length; i++)
+			{
+				byte value = data[i];
+				sb.Append(hex[value >> 4]);
+				sb.Append(hex[value & 0x0F]);
+				chars += 2;
+
+				if (chars >= lineChars)
+				{
+					sb.AppendLine();
+					chars = 0;
+				}
+			}
+
+			if (chars != 0)
+			{
+				sb.AppendLine();
+			}
 		}
 
 		private string toPdfDouble(double value)

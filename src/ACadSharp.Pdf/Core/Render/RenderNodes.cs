@@ -91,6 +91,35 @@ namespace ACadSharp.Pdf.Core.Render
 		}
 	}
 
+	public sealed class ImageNode : RenderNode
+	{
+		public byte[] Rgb24Data { get; }
+
+		public int SourceWidthPixels { get; }
+
+		public int SourceHeightPixels { get; }
+
+		public double DisplayWidth { get; }
+
+		public double DisplayHeight { get; }
+
+		public ImageNode(
+			ulong sourceHandle,
+			byte[] rgb24Data,
+			int sourceWidthPixels,
+			int sourceHeightPixels,
+			double displayWidth,
+			double displayHeight)
+			: base(sourceHandle)
+		{
+			this.Rgb24Data = rgb24Data ?? throw new ArgumentNullException(nameof(rgb24Data));
+			this.SourceWidthPixels = sourceWidthPixels;
+			this.SourceHeightPixels = sourceHeightPixels;
+			this.DisplayWidth = displayWidth;
+			this.DisplayHeight = displayHeight;
+		}
+	}
+
 	public sealed class GroupNode : RenderNode
 	{
 		public Matrix4 Transform { get; }

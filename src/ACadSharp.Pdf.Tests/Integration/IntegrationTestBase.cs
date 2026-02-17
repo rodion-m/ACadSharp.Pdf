@@ -34,22 +34,30 @@ namespace ACadSharp.Pdf.Tests.Integration
 			return DxfReader.Read(path);
 		}
 
-		protected FileInfo ExportLegacy(CadDocument doc, string name)
+		protected FileInfo ExportLegacy(CadDocument doc, string name, string basePath = null)
 		{
 			string path = Path.Combine(OutputFolder, $"{name}_legacy.pdf");
 			PdfExporter exporter = new PdfExporter(path);
 			exporter.Configuration.UseSceneGraph = false;
+			if (!string.IsNullOrWhiteSpace(basePath))
+			{
+				exporter.Configuration.BasePath = basePath;
+			}
 			exporter.Configuration.OnNotification += this.onNotification;
 			exporter.AddModelSpace(doc);
 			exporter.Close();
 			return new FileInfo(path);
 		}
 
-		protected FileInfo ExportSceneGraph(CadDocument doc, string name)
+		protected FileInfo ExportSceneGraph(CadDocument doc, string name, string basePath = null)
 		{
 			string path = Path.Combine(OutputFolder, $"{name}_scenegraph.pdf");
 			PdfExporter exporter = new PdfExporter(path);
 			exporter.Configuration.UseSceneGraph = true;
+			if (!string.IsNullOrWhiteSpace(basePath))
+			{
+				exporter.Configuration.BasePath = basePath;
+			}
 			exporter.Configuration.OnNotification += this.onNotification;
 			exporter.AddModelSpace(doc);
 			exporter.Close();

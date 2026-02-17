@@ -55,4 +55,55 @@ namespace ACadSharp.Pdf.Core.Render.Flattening
 			this.Color = color;
 		}
 	}
+
+	public sealed class FlatImageCommand : FlatDrawCommand
+	{
+		public byte[] Rgb24Data { get; }
+
+		public int SourceWidthPixels { get; }
+
+		public int SourceHeightPixels { get; }
+
+		public double DisplayWidth { get; }
+
+		public double DisplayHeight { get; }
+
+		public double A { get; }
+
+		public double B { get; }
+
+		public double C { get; }
+
+		public double D { get; }
+
+		public double E { get; }
+
+		public double F { get; }
+
+		public FlatImageCommand(
+			byte[] rgb24Data,
+			int sourceWidthPixels,
+			int sourceHeightPixels,
+			double displayWidth,
+			double displayHeight,
+			double a,
+			double b,
+			double c,
+			double d,
+			double e,
+			double f)
+		{
+			this.Rgb24Data = rgb24Data ?? throw new ArgumentNullException(nameof(rgb24Data));
+			this.SourceWidthPixels = sourceWidthPixels;
+			this.SourceHeightPixels = sourceHeightPixels;
+			this.DisplayWidth = displayWidth;
+			this.DisplayHeight = displayHeight;
+			this.A = a;
+			this.B = b;
+			this.C = c;
+			this.D = d;
+			this.E = e;
+			this.F = f;
+		}
+	}
 }

@@ -11,7 +11,7 @@ namespace ACadSharp.Pdf.Tests.Integration
 
 		public Stage06ImageUnderlayIntegrationTests(ITestOutputHelper output) : base(output) { }
 
-		[Fact(Skip = "Stage 06 (Image/Underlay) rendering not yet implemented; external files missing")]
+		[Fact]
 		public void LoadFixture_HasImageAndUnderlay()
 		{
 			CadDocument doc = this.LoadFixture(Fixture);
@@ -23,20 +23,30 @@ namespace ACadSharp.Pdf.Tests.Integration
 			Assert.True(underlayCount >= 1, $"Expected at least 1 PdfUnderlay, found {underlayCount}");
 		}
 
-		[Fact(Skip = "Stage 06 (Image/Underlay) rendering not yet implemented")]
+		[Fact]
 		public void ExportLegacy_ProducesValidPdf()
 		{
 			CadDocument doc = this.LoadFixture(Fixture);
-			FileInfo pdf = this.ExportLegacy(doc, "stage06");
+			FileInfo pdf = this.ExportLegacy(doc, "stage06", FixturesFolder);
 			this.AssertValidPdf(pdf);
+			AssertPdfContainsInlineImage(pdf);
 		}
 
-		[Fact(Skip = "Stage 06 (Image/Underlay) rendering not yet implemented")]
+		[Fact]
 		public void ExportSceneGraph_ProducesValidPdf()
 		{
 			CadDocument doc = this.LoadFixture(Fixture);
-			FileInfo pdf = this.ExportSceneGraph(doc, "stage06");
+			FileInfo pdf = this.ExportSceneGraph(doc, "stage06", FixturesFolder);
 			this.AssertValidPdf(pdf);
+			AssertPdfContainsInlineImage(pdf);
+		}
+
+		private static void AssertPdfContainsInlineImage(FileInfo pdf)
+		{
+			byte[] bytes = File.ReadAllBytes(pdf.FullName);
+			string text = System.Text.Encoding.ASCII.GetString(bytes);
+			Assert.Contains("BI", text);
+			Assert.Contains("/ASCIIHexDecode", text);
 		}
 	}
 }
