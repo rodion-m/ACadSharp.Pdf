@@ -4,6 +4,7 @@ using ACadSharp.IO;
 using ACadSharp.Objects;
 using ACadSharp.Pdf.Core.Render.Style;
 using ACadSharp.Pdf.Core.Render.Transforms;
+using ACadSharp.Tables;
 using CSMath;
 using System;
 using System.Collections.Generic;
@@ -17,6 +18,23 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 		private readonly PdfConfiguration _configuration;
 		private readonly PropertyResolver _resolver;
 		private readonly RenderLog _log;
+		private readonly BlockExpander _blockExpander;
+
+		private readonly struct InsertRenderContext
+		{
+			public ACadSharp.Color ByBlockColor { get; }
+			public LineWeightType ByBlockLineWeight { get; }
+			public LineType ByBlockLineType { get; }
+			public Layer InsertLayer { get; }
+
+			public InsertRenderContext(ACadSharp.Color byBlockColor, LineWeightType byBlockLineWeight, LineType byBlockLineType, Layer insertLayer)
+			{
+				this.ByBlockColor = byBlockColor;
+				this.ByBlockLineWeight = byBlockLineWeight;
+				this.ByBlockLineType = byBlockLineType;
+				this.InsertLayer = insertLayer;
+			}
+		}
 
 		public SceneGraphBuilder(Layout layout, PdfConfiguration configuration, PropertyResolver resolver, RenderLog log)
 		{
@@ -24,6 +42,7 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 			this._configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
 			this._resolver = resolver ?? throw new ArgumentNullException(nameof(resolver));
 			this._log = log ?? throw new ArgumentNullException(nameof(log));
+			this._blockExpander = new BlockExpander(log);
 		}
 
 		public IReadOnlyList<RenderNode> Build(IReadOnlyList<Viewport> viewports, IReadOnlyList<Entity> paperEntities)
@@ -46,7 +65,15 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 			{
 				foreach (var e in paperEntities)
 				{
-					var en = buildEntityNode(e, viewport: null, geometricScaleToPaper: 1.0);
+					var en = buildEntityNode(
+						e,
+						viewport: null,
+						styleScaleToPaper: 1.0,
+						textScaleToPaper: 1.0,
+						containingInsert: null,
+						parentTransform: Matrix4.Identity,
+						depth: 0,
+						activeBlocks: null);
 					if (en != null)
 					{
 						nodes.Add(en);
@@ -94,7 +121,15 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 
 			foreach (var e in modelEntities)
 			{
-				var child = buildEntityNode(e, viewport, viewport.ScaleFactor);
+				var child = buildEntityNode(
+					e,
+					viewport,
+					styleScaleToPaper: viewport.ScaleFactor,
+					textScaleToPaper: viewport.ScaleFactor,
+					containingInsert: null,
+					parentTransform: Matrix4.Identity,
+					depth: 0,
+					activeBlocks: null);
 				if (child != null)
 				{
 					children.Add(child);
@@ -105,41 +140,72 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 			return new ClipNode(viewport.Handle, clipPath, new[] { group });
 		}
 
-		private RenderNode buildEntityNode(Entity entity, Viewport viewport, double geometricScaleToPaper)
-		{
+			private RenderNode buildEntityNode(
+				Entity entity,
+				Viewport viewport,
+				double styleScaleToPaper,
+				double textScaleToPaper,
+				InsertRenderContext? containingInsert,
+				Matrix4 parentTransform,
+				int depth,
+				HashSet<string> activeBlocks)
+			{
 			if (entity == null)
 			{
 				return null;
 			}
 
-			var vis = this._resolver.GetVisibility(entity, viewport);
-			if (vis != VisibilityDecision.Visible)
-			{
-				this._log.Add(entity.Handle, entity.SubclassMarker, RenderStatus.Skipped, $"Visibility gate: {vis}");
-				return null;
-			}
+			HashSet<string> stack = activeBlocks ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
 			try
 			{
-				switch (entity)
+					Entity prepared = applyLayerZeroInheritance(entity, containingInsert);
+
+					if (prepared is Insert insert)
+					{
+						Layer effectiveInsertLayer = resolveEffectiveLayer(insert.Layer, containingInsert);
+						var visInsert = getVisibilityWithLayer(insert, effectiveInsertLayer, viewport);
+						if (visInsert != VisibilityDecision.Visible)
+						{
+							this._log.Add(insert.Handle, insert.SubclassMarker, RenderStatus.Skipped, $"Visibility gate: {visInsert}");
+							return null;
+						}
+
+						return buildInsert(insert, effectiveInsertLayer, viewport, styleScaleToPaper, textScaleToPaper, containingInsert, parentTransform, depth, stack);
+					}
+
+				if (!isIdentity(parentTransform))
 				{
-					case Line line:
-						return buildLine(line, geometricScaleToPaper);
-					case Arc arc:
-						return buildArc(arc, geometricScaleToPaper);
-					case Circle circle:
-						return buildCircle(circle, geometricScaleToPaper);
-					case Ellipse ellipse:
-						return buildEllipse(ellipse, geometricScaleToPaper);
-					case Point point:
-						return buildPoint(point, geometricScaleToPaper);
-					case IPolyline polyline:
-						return buildPolyline(polyline, geometricScaleToPaper);
-					case TextEntity text:
-						return buildText(text, geometricScaleToPaper);
+					prepared = cloneWithTransform(prepared, parentTransform);
+				}
+
+				var vis = this._resolver.GetVisibility(prepared, viewport);
+				if (vis != VisibilityDecision.Visible)
+				{
+					this._log.Add(prepared.Handle, prepared.SubclassMarker, RenderStatus.Skipped, $"Visibility gate: {vis}");
+					return null;
+				}
+
+					switch (prepared)
+					{
+						case Line line:
+							return buildLine(line, styleScaleToPaper, containingInsert);
+						case Arc arc:
+							return buildArc(arc, styleScaleToPaper, containingInsert);
+						case Circle circle:
+							return buildCircle(circle, styleScaleToPaper, containingInsert);
+						case Ellipse ellipse:
+							return buildEllipse(ellipse, styleScaleToPaper, containingInsert);
+						case Point point:
+							// Points are a constant paper-size dot; only viewport scaling should affect compensation.
+							return buildPoint(point, textScaleToPaper, containingInsert);
+						case IPolyline polyline:
+							return buildPolyline(polyline, styleScaleToPaper, containingInsert);
+						case TextEntity text:
+							return buildText(text, textScaleToPaper, containingInsert);
 					default:
-						this._log.Add(entity.Handle, entity.SubclassMarker, RenderStatus.NotImplemented, "Entity not supported in Stage 00 frontend.");
-						this._configuration.Notify($"[{entity.SubclassMarker}] Drawing not implemented (scene graph pipeline).", NotificationType.NotImplemented);
+						this._log.Add(prepared.Handle, prepared.SubclassMarker, RenderStatus.NotImplemented, "Entity not supported in Stage 00 frontend.");
+						this._configuration.Notify($"[{prepared.SubclassMarker}] Drawing not implemented (scene graph pipeline).", NotificationType.NotImplemented);
 						return null;
 				}
 			}
@@ -151,11 +217,377 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 			}
 		}
 
-		private PathNode buildLine(Line line, double geometricScaleToPaper)
-		{
-			var stroke = this._resolver.ResolveStroke(line, this._layout, geometricScaleToPaper);
-			var segs = new PathSegment[]
+			private RenderNode buildInsert(
+				Insert insert,
+				Layer effectiveInsertLayer,
+				Viewport viewport,
+				double styleScaleToPaper,
+				double textScaleToPaper,
+				InsertRenderContext? containingInsert,
+				Matrix4 parentTransform,
+				int depth,
+				HashSet<string> activeBlocks)
 			{
+				if (!this._blockExpander.TryEnter(insert, depth, activeBlocks, out BlockRecord block, out string blockKey))
+				{
+					return null;
+				}
+
+			try
+			{
+				IReadOnlyList<Matrix4> cellTransforms = this._blockExpander.ComputeCellTransforms(insert, parentTransform);
+					if (cellTransforms.Count == 0)
+					{
+						return null;
+					}
+
+					double childStyleScale = styleScaleToPaper * this._blockExpander.ComputeInsertScaleFactor(insert);
+					InsertRenderContext childContext = createInsertContext(insert, effectiveInsertLayer, containingInsert);
+					var nodes = new List<RenderNode>();
+
+				foreach (var cellTransform in cellTransforms)
+				{
+					foreach (Entity blockEntity in block.Entities)
+					{
+						if (blockEntity is AttributeDefinition)
+						{
+							continue;
+						}
+
+						var node = buildEntityNode(
+							blockEntity,
+							viewport,
+							childStyleScale,
+							textScaleToPaper,
+							childContext,
+							cellTransform,
+							depth + 1,
+							activeBlocks);
+						if (node != null)
+						{
+							nodes.Add(node);
+						}
+					}
+
+					foreach (var attNode in buildInsertAttributes(insert, block, viewport, childStyleScale, textScaleToPaper, childContext, cellTransform, depth + 1, activeBlocks))
+					{
+						nodes.Add(attNode);
+					}
+				}
+
+				if (nodes.Count == 0)
+				{
+					this._log.Add(insert.Handle, insert.SubclassMarker, RenderStatus.Skipped, $"Expanded block '{block.Name}' has no visible entities.");
+					return null;
+				}
+
+				this._log.Add(insert.Handle, insert.SubclassMarker, RenderStatus.Rendered, $"Expanded block '{block.Name}' ({nodes.Count} node(s)).");
+				return new GroupNode(insert.Handle, Matrix4.Identity, nodes);
+			}
+			finally
+			{
+				this._blockExpander.Leave(blockKey, activeBlocks);
+			}
+		}
+
+		private IReadOnlyList<RenderNode> buildInsertAttributes(
+			Insert insert,
+			BlockRecord block,
+			Viewport viewport,
+			double styleScaleToPaper,
+			double textScaleToPaper,
+			InsertRenderContext childContext,
+			Matrix4 cellTransform,
+			int depth,
+			HashSet<string> activeBlocks)
+		{
+			if (insert.Attributes == null || insert.Attributes.Count == 0)
+			{
+				return Array.Empty<RenderNode>();
+			}
+
+			var nodes = new List<RenderNode>();
+			foreach (AttributeEntity att in insert.Attributes)
+			{
+				if (att == null)
+				{
+					continue;
+				}
+
+				if (att.IsInvisible || att.Flags.HasFlag(AttributeFlags.Hidden))
+				{
+					this._log.Add(att.Handle, att.SubclassMarker, RenderStatus.Skipped, "ATTRIB hidden/invisible.");
+					continue;
+				}
+
+				AttributeEntity renderAtt = att.CloneTyped();
+				AttributeDefinition def = findAttributeDefinition(block, att.Tag);
+				if (string.IsNullOrEmpty(renderAtt.Value) && def != null)
+				{
+					renderAtt.Value = def.Value ?? string.Empty;
+				}
+
+				if (string.IsNullOrEmpty(renderAtt.Value))
+				{
+					this._log.Add(renderAtt.Handle, renderAtt.SubclassMarker, RenderStatus.Skipped, "ATTRIB value is empty.");
+					continue;
+				}
+
+				var node = buildEntityNode(
+					renderAtt,
+					viewport,
+					styleScaleToPaper,
+					textScaleToPaper,
+					childContext,
+					cellTransform,
+					depth,
+					activeBlocks);
+				if (node != null)
+				{
+					nodes.Add(node);
+				}
+			}
+
+			return nodes;
+		}
+
+		private static AttributeDefinition findAttributeDefinition(BlockRecord block, string tag)
+		{
+			if (block == null || string.IsNullOrWhiteSpace(tag))
+			{
+				return null;
+			}
+
+			foreach (AttributeDefinition def in block.AttributeDefinitions)
+			{
+				if (string.Equals(def.Tag, tag, StringComparison.OrdinalIgnoreCase))
+				{
+					return def;
+				}
+			}
+
+			return null;
+		}
+
+			private InsertRenderContext createInsertContext(Insert insert, Layer effectiveLayer, InsertRenderContext? parentContext)
+			{
+				ACadSharp.Color resolvedColor = resolveColorForInsertContext(insert, effectiveLayer, parentContext);
+				LineWeightType resolvedLw = resolveLineWeightForInsertContext(insert, effectiveLayer, parentContext);
+				LineType resolvedLt = resolveLineTypeForInsertContext(insert, effectiveLayer, parentContext);
+
+				return new InsertRenderContext(resolvedColor, resolvedLw, resolvedLt, effectiveLayer);
+			}
+
+			private static Entity applyLayerZeroInheritance(Entity entity, InsertRenderContext? context)
+			{
+				if (!context.HasValue)
+				{
+					return entity;
+			}
+
+			if (context.Value.InsertLayer == null || entity.Layer == null)
+			{
+				return entity;
+			}
+
+			if (!isLayerZero(entity.Layer.Name))
+			{
+				return entity;
+			}
+
+			// Cloning INSERT can recursively clone its owned block graph; keep INSERT untouched here.
+			if (entity is Insert)
+			{
+				return entity;
+			}
+
+			Entity clone = entity.CloneTyped();
+			clone.Layer = context.Value.InsertLayer;
+			return clone;
+		}
+
+		private static Entity cloneWithTransform(Entity entity, Matrix4 transform)
+		{
+			Entity clone = entity.CloneTyped();
+			clone.ApplyTransform(new Transform(transform));
+			return clone;
+		}
+
+			private StrokeStyle resolveStroke(Entity entity, double styleScaleToPaper, InsertRenderContext? containingInsert)
+			{
+				ACadSharp.Color? byBlockColor = containingInsert?.ByBlockColor;
+				LineWeightType? byBlockLineWeight = containingInsert?.ByBlockLineWeight;
+				LineType byBlockLineType = containingInsert?.ByBlockLineType;
+				return this._resolver.ResolveStroke(entity, this._layout, styleScaleToPaper, byBlockColor, byBlockLineWeight, byBlockLineType);
+			}
+
+			private static Layer resolveEffectiveLayer(Layer entityLayer, InsertRenderContext? context)
+			{
+				if (entityLayer == null || !context.HasValue)
+				{
+					return entityLayer;
+				}
+
+				if (!isLayerZero(entityLayer.Name))
+				{
+					return entityLayer;
+				}
+
+				return context.Value.InsertLayer ?? entityLayer;
+			}
+
+			private VisibilityDecision getVisibilityWithLayer(Entity entity, Layer effectiveLayer, Viewport viewport)
+			{
+				if (entity == null) throw new ArgumentNullException(nameof(entity));
+
+				if (entity.IsInvisible)
+				{
+					return VisibilityDecision.InvisibleFlag;
+				}
+
+				Layer layer = effectiveLayer ?? entity.Layer;
+				if (layer != null)
+				{
+					if (!layer.IsOn)
+					{
+						return VisibilityDecision.LayerOff;
+					}
+
+					if (layer.Flags.HasFlag(LayerFlags.Frozen))
+					{
+						return VisibilityDecision.LayerFrozen;
+					}
+
+					if (!layer.PlotFlag)
+					{
+						return VisibilityDecision.LayerNotPlottable;
+					}
+
+					if (viewport != null && viewport.FrozenLayers != null && viewport.FrozenLayers.Count > 0)
+					{
+						if (viewport.FrozenLayers.Any(l => string.Equals(l?.Name, layer.Name, StringComparison.OrdinalIgnoreCase)))
+						{
+							return VisibilityDecision.ViewportFrozenLayer;
+						}
+					}
+				}
+
+				return VisibilityDecision.Visible;
+			}
+
+			private static ACadSharp.Color resolveColorForInsertContext(Insert insert, Layer effectiveLayer, InsertRenderContext? parentContext)
+			{
+				ACadSharp.Color color = insert.Color;
+
+				if (color.IsTrueColor)
+				{
+					return mapAci7(color);
+				}
+
+				if (!color.IsByLayer && !color.IsByBlock && color.Index > 0)
+				{
+					return mapAci7(color);
+				}
+
+				if (color.IsByLayer)
+				{
+					return mapAci7(effectiveLayer?.Color ?? ACadSharp.Color.Default);
+				}
+
+				// ByBlock
+				if (parentContext.HasValue)
+				{
+					return mapAci7(parentContext.Value.ByBlockColor);
+				}
+
+				return mapAci7(effectiveLayer?.Color ?? ACadSharp.Color.Default);
+			}
+
+			private static LineWeightType resolveLineWeightForInsertContext(Insert insert, Layer effectiveLayer, InsertRenderContext? parentContext)
+			{
+				LineWeightType lw = insert.LineWeight;
+				switch (lw)
+				{
+					case LineWeightType.ByLayer:
+						return effectiveLayer?.LineWeight ?? LineWeightType.Default;
+					case LineWeightType.ByBlock:
+						{
+							LineWeightType resolved = parentContext?.ByBlockLineWeight
+								?? (insert.Owner is BlockRecord record ? record.BlockEntity.LineWeight : LineWeightType.Default);
+							if (resolved == LineWeightType.ByBlock)
+							{
+								resolved = LineWeightType.Default;
+							}
+							return resolved;
+						}
+					case LineWeightType.ByDIPs:
+					case LineWeightType.Default:
+						return LineWeightType.Default;
+					default:
+						return lw;
+				}
+			}
+
+			private static LineType resolveLineTypeForInsertContext(Insert insert, Layer effectiveLayer, InsertRenderContext? parentContext)
+			{
+				LineType lt = insert.LineType ?? LineType.Continuous;
+
+				if (string.Equals(lt.Name, LineType.ByLayerName, StringComparison.InvariantCultureIgnoreCase))
+				{
+					return effectiveLayer?.LineType ?? LineType.Continuous;
+				}
+
+				if (string.Equals(lt.Name, LineType.ByBlockName, StringComparison.InvariantCultureIgnoreCase))
+				{
+					return parentContext?.ByBlockLineType ?? LineType.Continuous;
+				}
+
+				return lt;
+			}
+
+			private static ACadSharp.Color mapAci7(ACadSharp.Color color)
+			{
+				if (!color.IsTrueColor && color.Index == 7)
+				{
+					return new ACadSharp.Color(0, 0, 0);
+				}
+
+				return color;
+			}
+
+			private static bool isLayerZero(string name)
+			{
+				return string.Equals(name, Layer.DefaultName, StringComparison.OrdinalIgnoreCase)
+					|| string.Equals(name, "0", StringComparison.OrdinalIgnoreCase);
+		}
+
+		private static bool isIdentity(Matrix4 matrix)
+		{
+			const double eps = 1e-12;
+			return
+				Math.Abs(matrix.M00 - 1.0) < eps &&
+				Math.Abs(matrix.M11 - 1.0) < eps &&
+				Math.Abs(matrix.M22 - 1.0) < eps &&
+				Math.Abs(matrix.M33 - 1.0) < eps &&
+				Math.Abs(matrix.M01) < eps &&
+				Math.Abs(matrix.M02) < eps &&
+				Math.Abs(matrix.M03) < eps &&
+				Math.Abs(matrix.M10) < eps &&
+				Math.Abs(matrix.M12) < eps &&
+				Math.Abs(matrix.M13) < eps &&
+				Math.Abs(matrix.M20) < eps &&
+				Math.Abs(matrix.M21) < eps &&
+				Math.Abs(matrix.M23) < eps &&
+				Math.Abs(matrix.M30) < eps &&
+				Math.Abs(matrix.M31) < eps &&
+				Math.Abs(matrix.M32) < eps;
+		}
+
+			private PathNode buildLine(Line line, double styleScaleToPaper, InsertRenderContext? containingInsert)
+			{
+				var stroke = resolveStroke(line, styleScaleToPaper, containingInsert);
+				var segs = new PathSegment[]
+				{
 				new MoveTo((XY)line.StartPoint),
 				new LineTo((XY)line.EndPoint),
 			};
@@ -164,7 +596,7 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 			return new PathNode(line.Handle, segs, stroke, fill: null);
 		}
 
-		private PathNode buildPolyline(IPolyline polyline, double geometricScaleToPaper)
+		private PathNode buildPolyline(IPolyline polyline, double styleScaleToPaper, InsertRenderContext? containingInsert)
 		{
 			Entity polyEntity = (Entity)polyline;
 			var pts = polyline.GetPoints<XYZ>(this._configuration.ArcPrecision).ToArray();
@@ -174,7 +606,7 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 				return null;
 			}
 
-			var stroke = this._resolver.ResolveStroke(polyEntity, this._layout, geometricScaleToPaper);
+			var stroke = resolveStroke(polyEntity, styleScaleToPaper, containingInsert);
 			var segs = new List<PathSegment>(pts.Length + 2);
 			segs.Add(new MoveTo((XY)pts[0]));
 			for (int i = 1; i < pts.Length; i++)
@@ -191,7 +623,7 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 			return new PathNode(polyEntity.Handle, segs, stroke, fill: null);
 		}
 
-		private PathNode buildArc(Arc arc, double geometricScaleToPaper)
+		private PathNode buildArc(Arc arc, double styleScaleToPaper, InsertRenderContext? containingInsert)
 		{
 			var pts = arc.PolygonalVertexes(this._configuration.ArcPrecision).ToArray();
 			if (pts.Length < 2)
@@ -200,7 +632,7 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 				return null;
 			}
 
-			var stroke = this._resolver.ResolveStroke(arc, this._layout, geometricScaleToPaper);
+			var stroke = resolveStroke(arc, styleScaleToPaper, containingInsert);
 			var segs = new List<PathSegment>(pts.Length);
 			segs.Add(new MoveTo((XY)pts[0]));
 			for (int i = 1; i < pts.Length; i++)
@@ -212,7 +644,7 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 			return new PathNode(arc.Handle, segs, stroke, fill: null);
 		}
 
-		private PathNode buildEllipse(Ellipse ellipse, double geometricScaleToPaper)
+		private PathNode buildEllipse(Ellipse ellipse, double styleScaleToPaper, InsertRenderContext? containingInsert)
 		{
 			var pts = ellipse.PolygonalVertexes(this._configuration.ArcPrecision).ToArray();
 			if (pts.Length < 2)
@@ -221,7 +653,7 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 				return null;
 			}
 
-			var stroke = this._resolver.ResolveStroke(ellipse, this._layout, geometricScaleToPaper);
+			var stroke = resolveStroke(ellipse, styleScaleToPaper, containingInsert);
 			var segs = new List<PathSegment>(pts.Length);
 			segs.Add(new MoveTo((XY)pts[0]));
 			for (int i = 1; i < pts.Length; i++)
@@ -233,7 +665,7 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 			return new PathNode(ellipse.Handle, segs, stroke, fill: null);
 		}
 
-		private PathNode buildCircle(Circle circle, double geometricScaleToPaper)
+		private PathNode buildCircle(Circle circle, double styleScaleToPaper, InsertRenderContext? containingInsert)
 		{
 			var pts = circle.PolygonalVertexes(this._configuration.ArcPrecision).ToArray();
 			if (pts.Length < 2)
@@ -242,7 +674,7 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 				return null;
 			}
 
-			var stroke = this._resolver.ResolveStroke(circle, this._layout, geometricScaleToPaper);
+			var stroke = resolveStroke(circle, styleScaleToPaper, containingInsert);
 			var segs = new List<PathSegment>(pts.Length + 1);
 			segs.Add(new MoveTo((XY)pts[0]));
 			for (int i = 1; i < pts.Length; i++)
@@ -255,31 +687,31 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 			return new PathNode(circle.Handle, segs, stroke, fill: null);
 		}
 
-		private PathNode buildPoint(Point point, double geometricScaleToPaper)
-		{
-			double sizePaper = this._configuration.DotSize;
-			double sizeLocal = geometricScaleToPaper <= 0 ? sizePaper : sizePaper / geometricScaleToPaper;
-			double diff = sizeLocal / 2;
+			private PathNode buildPoint(Point point, double pointScaleToPaper, InsertRenderContext? containingInsert)
+			{
+				double sizePaper = this._configuration.DotSize;
+				double sizeLocal = pointScaleToPaper <= 0 ? sizePaper : sizePaper / pointScaleToPaper;
+				double diff = sizeLocal / 2;
 
-			XY p = (XY)point.Location;
-			XY min = new XY(p.X - diff, p.Y - diff);
-			XY max = new XY(p.X + diff, p.Y + diff);
+				XY p = (XY)point.Location;
+				XY min = new XY(p.X - diff, p.Y - diff);
+				XY max = new XY(p.X + diff, p.Y + diff);
 
-			var fillColor = this._resolver.ResolveStroke(point, this._layout, geometricScaleToPaper).Color;
-			var fill = new FillStyle(fillColor);
+				var fillColor = resolveStroke(point, pointScaleToPaper, containingInsert).Color;
+				var fill = new FillStyle(fillColor);
 
 			var rect = rectanglePath(point.Handle, min, max);
 			this._log.Add(point.Handle, point.SubclassMarker, RenderStatus.Rendered, "Rendered as filled rectangle (dot).");
 			return new PathNode(point.Handle, rect.Segments, stroke: null, fill: fill);
 		}
 
-		private TextRunNode buildText(TextEntity text, double geometricScaleToPaper)
+		private TextRunNode buildText(TextEntity text, double textScaleToPaper, InsertRenderContext? containingInsert)
 		{
 			// Resolve final font size in PDF points. TEXT height is in current space units.
-			double heightPaperUnits = text.Height * geometricScaleToPaper;
+			double heightPaperUnits = text.Height * textScaleToPaper;
 			double fontSizePt = TransformHelper.PaperToPdfPoints(heightPaperUnits, this._layout);
 
-			ACadSharp.Color color = this._resolver.ResolveStroke(text, this._layout, geometricScaleToPaper).Color;
+			ACadSharp.Color color = resolveStroke(text, textScaleToPaper, containingInsert).Color;
 			// Keep anchor in local space; transforms (viewport/blocks) are applied by the flattener.
 			XY anchorLocal = (XY)text.InsertPoint;
 
