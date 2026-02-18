@@ -25,6 +25,7 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 		private readonly HatchPatternGenerator _hatchGenerator;
 		private readonly MLineOffsetRenderer _mlineRenderer;
 		private readonly UnderlayRasterCache _underlayRasterCache;
+		private readonly ToleranceFrameRenderer _toleranceRenderer;
 
 		private readonly struct InsertRenderContext
 		{
@@ -53,6 +54,7 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 			this._hatchGenerator = new HatchPatternGenerator(configuration, log);
 			this._mlineRenderer = new MLineOffsetRenderer(layout, configuration, resolver, log);
 			this._underlayRasterCache = new UnderlayRasterCache(configuration);
+			this._toleranceRenderer = new ToleranceFrameRenderer(layout, configuration, resolver, log, this._textLayout);
 		}
 
 		public IReadOnlyList<RenderNode> Build(IReadOnlyList<Viewport> viewports, IReadOnlyList<Entity> paperEntities)
@@ -317,6 +319,14 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 							return buildText(text, textScaleToPaper, containingInsert);
 						case MText mtext:
 							return buildMText(mtext, textScaleToPaper, containingInsert);
+						case Tolerance tolerance:
+							return this._toleranceRenderer.Render(
+								tolerance,
+								styleScaleToPaper,
+								textScaleToPaper,
+								containingInsert?.ByBlockColor,
+								containingInsert?.ByBlockLineWeight,
+								containingInsert?.ByBlockLineType);
 						case Dimension dimension:
 							return buildDimension(dimension, viewport, styleScaleToPaper, textScaleToPaper, containingInsert, parentTransform, depth, stack);
 					default:
