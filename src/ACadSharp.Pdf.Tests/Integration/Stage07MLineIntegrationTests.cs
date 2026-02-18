@@ -20,7 +20,7 @@ namespace ACadSharp.Pdf.Tests.Integration
 			Assert.True(count >= 2, $"Expected at least 2 MLine entities, found {count}");
 		}
 
-		[Fact(Skip = "Stage 07 (MLine) rendering not yet implemented")]
+		[Fact]
 		public void ExportLegacy_ProducesValidPdf()
 		{
 			CadDocument doc = this.LoadFixture(Fixture);
@@ -28,7 +28,7 @@ namespace ACadSharp.Pdf.Tests.Integration
 			this.AssertValidPdf(pdf);
 		}
 
-		[Fact(Skip = "Stage 07 (MLine) rendering not yet implemented")]
+		[Fact]
 		public void ExportSceneGraph_ProducesValidPdf()
 		{
 			CadDocument doc = this.LoadFixture(Fixture);
