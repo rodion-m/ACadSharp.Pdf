@@ -1,5 +1,6 @@
 using ACadSharp.Entities;
 using System.IO;
+using System.Text;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -23,20 +24,31 @@ namespace ACadSharp.Pdf.Tests.Integration
 			Assert.True(xlineCount >= 3, $"Expected at least 3 XLine entities, found {xlineCount}");
 		}
 
-		[Fact(Skip = "Stage 08 (Ray/XLine) rendering not yet implemented")]
+		[Fact]
 		public void ExportLegacy_ProducesValidPdf()
 		{
 			CadDocument doc = this.LoadFixture(Fixture);
 			FileInfo pdf = this.ExportLegacy(doc, "stage08");
 			this.AssertValidPdf(pdf);
+			Assert.Contains("RAY |", readAscii(pdf));
+			Assert.Contains("XLINE |", readAscii(pdf));
 		}
 
-		[Fact(Skip = "Stage 08 (Ray/XLine) rendering not yet implemented")]
+		[Fact]
 		public void ExportSceneGraph_ProducesValidPdf()
 		{
 			CadDocument doc = this.LoadFixture(Fixture);
 			FileInfo pdf = this.ExportSceneGraph(doc, "stage08");
 			this.AssertValidPdf(pdf);
+			string text = readAscii(pdf);
+			Assert.Contains(" m", text);
+			Assert.Contains(" l", text);
+		}
+
+		private static string readAscii(FileInfo file)
+		{
+			byte[] bytes = File.ReadAllBytes(file.FullName);
+			return Encoding.ASCII.GetString(bytes);
 		}
 	}
 }

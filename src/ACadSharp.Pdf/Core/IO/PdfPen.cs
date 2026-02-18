@@ -37,6 +37,7 @@ namespace ACadSharp.Pdf.Core.IO
 		private readonly StringBuilder _sb = new();
 
 		private readonly UnderlayRasterCache _underlayRasterCache;
+		private BoundingBox? _clipRectPaperOverride;
 
 		public PdfPen(Layout layout, PdfConfiguration configuration)
 		{
@@ -52,6 +53,11 @@ namespace ACadSharp.Pdf.Core.IO
 
 		public void DrawEntity(Entity entity, Transform transform)
 		{
+			if (!this._clipRectPaperOverride.HasValue)
+			{
+				this._clipRectPaperOverride = getPageClipRectPaper(this._layout);
+			}
+
 			this.writeEntityHeader(entity);
 
 			this.applyStyle(entity);
@@ -69,6 +75,12 @@ namespace ACadSharp.Pdf.Core.IO
 					break;
 				case Line line:
 					this.drawLine(line, transform);
+					break;
+				case Ray ray:
+					this.drawRay(ray, transform);
+					break;
+				case XLine xline:
+					this.drawXLine(xline, transform);
 					break;
 				case Point point:
 					this.drawPoint(point, transform);
@@ -322,12 +334,185 @@ namespace ACadSharp.Pdf.Core.IO
 			transform.Translation = box.Min - df;
 			transform.Scale = new XYZ(viewport.ScaleFactor);
 
-			foreach (Entity e in viewport.SelectEntities())
+			BoundingBox previousClip = this._clipRectPaperOverride ?? BoundingBox.Null;
+			try
 			{
-				this.DrawEntity(e, transform);
+				this._clipRectPaperOverride = getViewportClipRectPaper(viewport);
+				foreach (Entity e in selectViewportEntities(viewport))
+				{
+					this.DrawEntity(e, transform);
+				}
+			}
+			finally
+			{
+				this._clipRectPaperOverride = previousClip.Extent == BoundingBoxExtent.Null ? null : previousClip;
 			}
 
 			this._sb.AppendLine(PdfKey.StackEnd);
+		}
+
+		private IEnumerable<Entity> selectViewportEntities(Viewport viewport)
+		{
+			if (viewport == null || viewport.Document == null)
+			{
+				yield break;
+			}
+
+			BoundingBox viewBox = viewport.GetModelBoundingBox();
+			BoundingBox clipRect = viewBox;
+			if (tryCreateExpandedRect((XY)viewBox.Min, (XY)viewBox.Max, out BoundingBox expanded))
+			{
+				clipRect = expanded;
+			}
+
+			foreach (Entity entity in viewport.Document.Entities)
+			{
+				if (entity == null)
+				{
+					continue;
+				}
+
+				if (entity is Ray ray)
+				{
+					XY origin = new XY(ray.StartPoint.X, ray.StartPoint.Y);
+					XY direction = new XY(ray.Direction.X, ray.Direction.Y);
+					if (InfiniteLineClipper.ClipRay(origin, direction, clipRect).HasValue)
+					{
+						yield return entity;
+					}
+					continue;
+				}
+
+				if (entity is XLine xline)
+				{
+					XY origin = new XY(xline.FirstPoint.X, xline.FirstPoint.Y);
+					XY direction = new XY(xline.Direction.X, xline.Direction.Y);
+					if (InfiniteLineClipper.ClipXLine(origin, direction, clipRect).HasValue)
+					{
+						yield return entity;
+					}
+					continue;
+				}
+
+				BoundingBox box = entity.GetBoundingBox();
+				if (box.Extent == BoundingBoxExtent.Infinite)
+				{
+					continue;
+				}
+
+				if (viewBox.IsIn(box, out bool partialIn) || partialIn)
+				{
+					yield return entity;
+				}
+			}
+		}
+
+		private void drawRay(Ray ray, Transform transform)
+		{
+			if (ray == null)
+			{
+				return;
+			}
+
+			BoundingBox clipRect = this._clipRectPaperOverride ?? getPageClipRectPaper(this._layout);
+			XYZ origin3 = transform.ApplyTransform(ray.StartPoint);
+			XYZ dir3 = transformDirection(transform, ray.Direction);
+			XY origin = new XY(origin3.X, origin3.Y);
+			XY direction = new XY(dir3.X, dir3.Y);
+
+			var clipped = InfiniteLineClipper.ClipRay(origin, direction, clipRect);
+			if (!clipped.HasValue)
+			{
+				return;
+			}
+
+			this.appendXY(clipped.Value.Start, PdfKey.BeginPath);
+			this.appendXY(clipped.Value.End, PdfKey.Line);
+			this._sb.AppendLine(PdfKey.Stroke);
+		}
+
+		private void drawXLine(XLine xline, Transform transform)
+		{
+			if (xline == null)
+			{
+				return;
+			}
+
+			BoundingBox clipRect = this._clipRectPaperOverride ?? getPageClipRectPaper(this._layout);
+			XYZ origin3 = transform.ApplyTransform(xline.FirstPoint);
+			XYZ dir3 = transformDirection(transform, xline.Direction);
+			XY origin = new XY(origin3.X, origin3.Y);
+			XY direction = new XY(dir3.X, dir3.Y);
+
+			var clipped = InfiniteLineClipper.ClipXLine(origin, direction, clipRect);
+			if (!clipped.HasValue)
+			{
+				return;
+			}
+
+			this.appendXY(clipped.Value.Start, PdfKey.BeginPath);
+			this.appendXY(clipped.Value.End, PdfKey.Line);
+			this._sb.AppendLine(PdfKey.Stroke);
+		}
+
+		private static BoundingBox getViewportClipRectPaper(Viewport viewport)
+		{
+			BoundingBox box = viewport.GetBoundingBox();
+			if (tryCreateExpandedRect((XY)box.Min, (XY)box.Max, out BoundingBox expanded))
+			{
+				return expanded;
+			}
+			return box;
+		}
+
+		private static BoundingBox getPageClipRectPaper(Layout layout)
+		{
+			if (layout == null)
+			{
+				return new BoundingBox(new XYZ(-10000.0, -10000.0, 0.0), new XYZ(10000.0, 10000.0, 0.0));
+			}
+
+			double width = layout.PaperWidth;
+			double height = layout.PaperHeight;
+			if (width <= 1e-9 || height <= 1e-9)
+			{
+				return new BoundingBox(new XYZ(-10000.0, -10000.0, 0.0), new XYZ(10000.0, 10000.0, 0.0));
+			}
+
+			if (tryCreateExpandedRect(new XY(0.0, 0.0), new XY(width, height), out BoundingBox expanded))
+			{
+				return expanded;
+			}
+
+			return new BoundingBox(new XYZ(0.0, 0.0, 0.0), new XYZ(width, height, 0.0));
+		}
+
+		private static bool tryCreateExpandedRect(XY min, XY max, out BoundingBox expanded)
+		{
+			expanded = BoundingBox.Null;
+
+			double minX = Math.Min(min.X, max.X);
+			double minY = Math.Min(min.Y, max.Y);
+			double maxX = Math.Max(min.X, max.X);
+			double maxY = Math.Max(min.Y, max.Y);
+
+			double width = maxX - minX;
+			double height = maxY - minY;
+			if (width <= 1e-9 && height <= 1e-9)
+			{
+				return false;
+			}
+
+			double margin = Math.Max(width, height) * 0.02;
+			if (double.IsNaN(margin) || double.IsInfinity(margin) || margin <= 0.0)
+			{
+				margin = 1.0;
+			}
+
+			expanded = new BoundingBox(
+				new XYZ(minX - margin, minY - margin, 0.0),
+				new XYZ(maxX + margin, maxY + margin, 0.0));
+			return true;
 		}
 
 		private void drawRasterImage(RasterImage image, Transform transform)

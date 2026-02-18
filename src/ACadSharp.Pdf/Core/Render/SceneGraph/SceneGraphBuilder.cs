@@ -23,6 +23,7 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 		private readonly BlockExpander _blockExpander;
 		private readonly TextLayoutEngine _textLayout;
 		private readonly HatchPatternGenerator _hatchGenerator;
+		private readonly MLineOffsetRenderer _mlineRenderer;
 		private readonly UnderlayRasterCache _underlayRasterCache;
 
 		private readonly struct InsertRenderContext
@@ -50,6 +51,7 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 			this._blockExpander = new BlockExpander(log);
 			this._textLayout = new TextLayoutEngine(layout, configuration, log);
 			this._hatchGenerator = new HatchPatternGenerator(configuration, log);
+			this._mlineRenderer = new MLineOffsetRenderer(layout, configuration, resolver, log);
 			this._underlayRasterCache = new UnderlayRasterCache(configuration);
 		}
 
@@ -119,7 +121,7 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 			List<Entity> modelEntities;
 			try
 			{
-				modelEntities = viewport.SelectEntities();
+				modelEntities = selectViewportEntities(viewport);
 			}
 			catch (Exception ex)
 			{
@@ -146,6 +148,86 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 
 			var group = new GroupNode(viewport.Handle, modelToPaper, children);
 			return new ClipNode(viewport.Handle, clipPath, new[] { group });
+		}
+
+		private List<Entity> selectViewportEntities(Viewport viewport)
+		{
+			if (viewport == null)
+			{
+				return new List<Entity>();
+			}
+
+			if (viewport.Document == null)
+			{
+				throw new InvalidOperationException("Viewport needs to be assigned to a document.");
+			}
+
+			BoundingBox viewBox = viewport.GetModelBoundingBox();
+
+			BoundingBox clipRect = viewBox;
+			if (tryCreateExpandedClipRect((XY)viewBox.Min, (XY)viewBox.Max, out BoundingBox expanded))
+			{
+				clipRect = expanded;
+			}
+
+			var entities = new List<Entity>();
+			foreach (Entity entity in viewport.Document.Entities)
+			{
+				if (entity == null)
+				{
+					continue;
+				}
+
+				if (entity is Ray ray)
+				{
+					XY origin = new XY(ray.StartPoint.X, ray.StartPoint.Y);
+					XY direction = new XY(ray.Direction.X, ray.Direction.Y);
+					var clipped = InfiniteLineClipper.ClipRay(origin, direction, clipRect);
+					if (clipped.HasValue)
+					{
+						entities.Add(entity);
+					}
+					else
+					{
+						this._log.Add(ray.Handle, ray.SubclassMarker, RenderStatus.Skipped, "RAY outside viewport clip rectangle.");
+					}
+					continue;
+				}
+
+				if (entity is XLine xline)
+				{
+					XY origin = new XY(xline.FirstPoint.X, xline.FirstPoint.Y);
+					XY direction = new XY(xline.Direction.X, xline.Direction.Y);
+					var clipped = InfiniteLineClipper.ClipXLine(origin, direction, clipRect);
+					if (clipped.HasValue)
+					{
+						entities.Add(entity);
+					}
+					else
+					{
+						this._log.Add(xline.Handle, xline.SubclassMarker, RenderStatus.Skipped, "XLINE outside viewport clip rectangle.");
+					}
+					continue;
+				}
+
+				BoundingBox box = entity.GetBoundingBox();
+				if (box.Extent == BoundingBoxExtent.Infinite)
+				{
+					// Allow INSERTs with infinite child bounds (e.g., RAY/XLINE inside a block) through coarse selection.
+					if (entity is Insert)
+					{
+						entities.Add(entity);
+					}
+					continue;
+				}
+
+				if (viewBox.IsIn(box, out bool partialIn) || partialIn)
+				{
+					entities.Add(entity);
+				}
+			}
+
+			return entities;
 		}
 
 			private RenderNode buildEntityNode(
@@ -194,7 +276,7 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 						return buildMultiLeader(mleader, viewport, styleScaleToPaper, textScaleToPaper, containingInsert, parentTransform, depth, stack);
 					}
 
-				if (!isIdentity(parentTransform))
+				if (!isIdentity(parentTransform) && !(prepared is Ray) && !(prepared is XLine))
 				{
 					prepared = cloneWithTransform(prepared, parentTransform);
 				}
@@ -203,6 +285,10 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 					{
 						case Line line:
 							return buildLine(line, styleScaleToPaper, containingInsert);
+						case Ray ray:
+							return buildRay(ray, viewport, styleScaleToPaper, containingInsert, parentTransform);
+						case XLine xline:
+							return buildXLine(xline, viewport, styleScaleToPaper, containingInsert, parentTransform);
 						case Arc arc:
 							return buildArc(arc, styleScaleToPaper, containingInsert);
 						case Circle circle:
@@ -216,6 +302,13 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 							return buildPolyline(polyline, styleScaleToPaper, containingInsert);
 						case Hatch hatch:
 							return buildHatch(hatch, styleScaleToPaper, containingInsert);
+						case MLine mline:
+							return this._mlineRenderer.Render(
+								mline,
+								styleScaleToPaper,
+								containingInsert?.ByBlockColor,
+								containingInsert?.ByBlockLineWeight,
+								containingInsert?.ByBlockLineType);
 						case RasterImage rasterImage:
 							return buildRasterImage(rasterImage);
 						case PdfUnderlay pdfUnderlay:
@@ -633,17 +726,161 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 				Math.Abs(matrix.M32) < eps;
 		}
 
-			private PathNode buildLine(Line line, double styleScaleToPaper, InsertRenderContext? containingInsert)
+		private PathNode buildLine(Line line, double styleScaleToPaper, InsertRenderContext? containingInsert)
+		{
+			var stroke = resolveStroke(line, styleScaleToPaper, containingInsert);
+			var segs = new PathSegment[]
 			{
-				var stroke = resolveStroke(line, styleScaleToPaper, containingInsert);
-				var segs = new PathSegment[]
-				{
 				new MoveTo((XY)line.StartPoint),
 				new LineTo((XY)line.EndPoint),
 			};
 
 			this._log.Add(line.Handle, line.SubclassMarker, RenderStatus.Rendered, "Rendered as Path.");
 			return new PathNode(line.Handle, segs, stroke, fill: null);
+		}
+
+		private RenderNode buildRay(
+			Ray ray,
+			Viewport viewport,
+			double styleScaleToPaper,
+			InsertRenderContext? containingInsert,
+			Matrix4 parentTransform)
+		{
+			XY origin = transformPointToXY(ray.StartPoint, parentTransform);
+			XYZ directionWorld = transformDirection(parentTransform, ray.Direction);
+			XY direction = new XY(directionWorld.X, directionWorld.Y);
+
+			if (!isFiniteNumber(origin.X) || !isFiniteNumber(origin.Y)
+				|| !isFiniteNumber(direction.X) || !isFiniteNumber(direction.Y)
+				|| (Math.Abs(direction.X) <= 1e-12 && Math.Abs(direction.Y) <= 1e-12))
+			{
+				this._log.Add(ray.Handle, ray.SubclassMarker, RenderStatus.Skipped, "RAY has invalid or zero direction.");
+				return null;
+			}
+
+			BoundingBox clipRect = getInfiniteLineClipRect(viewport);
+			var clipped = InfiniteLineClipper.ClipRay(origin, direction, clipRect);
+			if (!clipped.HasValue)
+			{
+				this._log.Add(ray.Handle, ray.SubclassMarker, RenderStatus.Skipped, "RAY outside clip rectangle.");
+				return null;
+			}
+
+			var stroke = resolveStroke(ray, styleScaleToPaper, containingInsert);
+			PathNode path = createLinePath(ray.Handle, clipped.Value.Start, clipped.Value.End, stroke);
+			if (path == null)
+			{
+				this._log.Add(ray.Handle, ray.SubclassMarker, RenderStatus.Skipped, "RAY clipped to degenerate segment.");
+				return null;
+			}
+
+			this._log.Add(ray.Handle, ray.SubclassMarker, RenderStatus.Rendered, "Rendered as clipped ray segment.");
+			return path;
+		}
+
+		private RenderNode buildXLine(
+			XLine xline,
+			Viewport viewport,
+			double styleScaleToPaper,
+			InsertRenderContext? containingInsert,
+			Matrix4 parentTransform)
+		{
+			XY origin = transformPointToXY(xline.FirstPoint, parentTransform);
+			XYZ directionWorld = transformDirection(parentTransform, xline.Direction);
+			XY direction = new XY(directionWorld.X, directionWorld.Y);
+
+			if (!isFiniteNumber(origin.X) || !isFiniteNumber(origin.Y)
+				|| !isFiniteNumber(direction.X) || !isFiniteNumber(direction.Y)
+				|| (Math.Abs(direction.X) <= 1e-12 && Math.Abs(direction.Y) <= 1e-12))
+			{
+				this._log.Add(xline.Handle, xline.SubclassMarker, RenderStatus.Skipped, "XLINE has invalid or zero direction.");
+				return null;
+			}
+
+			BoundingBox clipRect = getInfiniteLineClipRect(viewport);
+			var clipped = InfiniteLineClipper.ClipXLine(origin, direction, clipRect);
+			if (!clipped.HasValue)
+			{
+				this._log.Add(xline.Handle, xline.SubclassMarker, RenderStatus.Skipped, "XLINE outside clip rectangle.");
+				return null;
+			}
+
+			var stroke = resolveStroke(xline, styleScaleToPaper, containingInsert);
+			PathNode path = createLinePath(xline.Handle, clipped.Value.Start, clipped.Value.End, stroke);
+			if (path == null)
+			{
+				this._log.Add(xline.Handle, xline.SubclassMarker, RenderStatus.Skipped, "XLINE clipped to degenerate segment.");
+				return null;
+			}
+
+			this._log.Add(xline.Handle, xline.SubclassMarker, RenderStatus.Rendered, "Rendered as clipped xline segment.");
+			return path;
+		}
+
+		private BoundingBox getInfiniteLineClipRect(Viewport viewport)
+		{
+			if (viewport != null)
+			{
+				BoundingBox viewportBox = viewport.GetModelBoundingBox();
+				if (tryCreateExpandedClipRect((XY)viewportBox.Min, (XY)viewportBox.Max, out BoundingBox expandedViewport))
+				{
+					return expandedViewport;
+				}
+			}
+
+			if (this._layout.IsPaperSpace)
+			{
+				if (tryCreateExpandedClipRect(new XY(0.0, 0.0), new XY(this._layout.PaperWidth, this._layout.PaperHeight), out BoundingBox paperRect))
+				{
+					return paperRect;
+				}
+			}
+
+			if (tryCreateExpandedClipRect((XY)this._layout.MinExtents, (XY)this._layout.MaxExtents, out BoundingBox extentsRect))
+			{
+				return extentsRect;
+			}
+
+			if (tryCreateExpandedClipRect(this._layout.MinLimits, this._layout.MaxLimits, out BoundingBox limitsRect))
+			{
+				return limitsRect;
+			}
+
+			return new BoundingBox(new XYZ(-10000.0, -10000.0, 0.0), new XYZ(10000.0, 10000.0, 0.0));
+		}
+
+		private static bool tryCreateExpandedClipRect(XY min, XY max, out BoundingBox clipRect)
+		{
+			clipRect = BoundingBox.Null;
+
+			if (!isFiniteNumber(min.X) || !isFiniteNumber(min.Y) || !isFiniteNumber(max.X) || !isFiniteNumber(max.Y))
+			{
+				return false;
+			}
+
+			double minX = Math.Min(min.X, max.X);
+			double minY = Math.Min(min.Y, max.Y);
+			double maxX = Math.Max(min.X, max.X);
+			double maxY = Math.Max(min.Y, max.Y);
+
+			double width = maxX - minX;
+			double height = maxY - minY;
+
+			if (width <= 1e-9 && height <= 1e-9)
+			{
+				return false;
+			}
+
+			double margin = Math.Max(width, height) * 0.02;
+			if (!isFiniteNumber(margin) || margin <= 0.0)
+			{
+				margin = 1.0;
+			}
+
+			clipRect = new BoundingBox(
+				new XYZ(minX - margin, minY - margin, 0.0),
+				new XYZ(maxX + margin, maxY + margin, 0.0));
+			return true;
 		}
 
 		private PathNode buildPolyline(IPolyline polyline, double styleScaleToPaper, InsertRenderContext? containingInsert)
@@ -3412,6 +3649,11 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 
 			normalized = new XY(value.X / len, value.Y / len);
 			return true;
+		}
+
+		private static bool isFiniteNumber(double value)
+		{
+			return !double.IsNaN(value) && !double.IsInfinity(value);
 		}
 
 		private static double dot(XY a, XY b)
