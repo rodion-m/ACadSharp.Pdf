@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-ACadSharp.Pdf generates PDF files from DWG/DXF drawings parsed by the [ACadSharp](https://github.com/DomCR/ACadSharp) library (included as a git submodule under `src/ACadSharp/`). It also generates preview images via SkiaSharp.
+ACadSharp.Pdf generates PDF files from DWG/DXF drawings parsed by the [ACadSharp](https://github.com/DomCR/ACadSharp) library. In this workspace, source builds use sibling repositories at `../ACadSharp` and `../CSUtilities` under `acad-inspector/`. It also generates preview images via SkiaSharp.
 
 ## Build & Test Commands
 
@@ -27,14 +27,17 @@ dotnet test --framework net9.0 --filter "FullyQualifiedName~RenderInfrastructure
 dotnet test --framework net48
 ```
 
-After cloning, initialize the ACadSharp submodule:
+For source builds, ensure the sibling repositories are checked out in the expected layout:
 ```bash
-git submodule update --force --recursive --init --remote
+acad-inspector/
+  ACadSharp.Pdf/
+  ACadSharp/
+  CSUtilities/
 ```
 
 ## Build Configurations
 
-- **Debug** — references ACadSharp via local project reference (`src/ACadSharp/src/ACadSharp/ACadSharp.csproj`)
+- **Debug** — references ACadSharp via local project reference (`../../../ACadSharp/src/ACadSharp/ACadSharp.csproj`)
 - **Release** — references ACadSharp via NuGet (`ACadSharp 3.3.*`), auto-generates `.nupkg`
 - **Test** — defined in `Directory.Build.props` alongside Debug/Release
 

@@ -206,6 +206,23 @@ namespace ACadSharp.Pdf.Tests
 		}
 
 		[Fact]
+		public void MText_Cyrillic_IsOutlinedWithoutQuestionMarks()
+		{
+			var mtext = new MText("Школа")
+			{
+				InsertPoint = new XYZ(0, 0, 0),
+				Height = 10,
+				AttachmentPoint = AttachmentPointType.TopLeft,
+			};
+
+			string content = renderEntity(mtext);
+			Assert.DoesNotContain("????", content);
+			Assert.DoesNotContain("(Школа) Tj", content);
+			Assert.Contains(" m", content);
+			Assert.Contains(" l", content);
+		}
+
+		[Fact]
 		public void MText_RectangleWidth_WrapsWords()
 		{
 			var mtext = new MText("AAAA BBBB CCCC")

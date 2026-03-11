@@ -837,9 +837,37 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 			}
 
 			// Keep output ASCII-friendly (the PDF backend is not Unicode-aware).
-			return value
-				.Replace("%%p", "+/-", StringComparison.OrdinalIgnoreCase)
-				.Replace("%%d", "deg", StringComparison.OrdinalIgnoreCase);
+			return replaceIgnoreCase(
+				replaceIgnoreCase(value, "%%p", "+/-"),
+				"%%d",
+				"deg");
+		}
+
+		private static string replaceIgnoreCase(string value, string oldValue, string newValue)
+		{
+			if (string.IsNullOrEmpty(value) || string.IsNullOrEmpty(oldValue))
+			{
+				return value ?? string.Empty;
+			}
+
+			int index = value.IndexOf(oldValue, StringComparison.OrdinalIgnoreCase);
+			if (index < 0)
+			{
+				return value;
+			}
+
+			var result = new System.Text.StringBuilder(value.Length);
+			int startIndex = 0;
+			while (index >= 0)
+			{
+				result.Append(value, startIndex, index - startIndex);
+				result.Append(newValue);
+				startIndex = index + oldValue.Length;
+				index = value.IndexOf(oldValue, startIndex, StringComparison.OrdinalIgnoreCase);
+			}
+
+			result.Append(value, startIndex, value.Length - startIndex);
+			return result.ToString();
 		}
 
 		private static bool tryParseGdtSymbol(string value, out char code)

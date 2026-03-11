@@ -34,6 +34,6 @@
 		<ProjectReference Include="..\ACadSharp.Pdf\ACadSharp.Pdf.csproj" />
 	</ItemGroup>
 
-	<Import Project="..\ACadSharp\src\CSUtilities\CSUtilities\CSUtilities.projitems" Label="Shared" />
+	<Import Project="..\..\..\CSUtilities\CSUtilities\CSUtilities.projitems" Label="Shared" />
 
 </Project>

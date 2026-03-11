@@ -1,4 +1,5 @@
-﻿using System;
+using System;
+using System.Globalization;
 
 namespace ACadSharp.Pdf.Core
 {
@@ -20,7 +21,13 @@ namespace ACadSharp.Pdf.Core
 
 		public override string GetPdfForm(PdfConfiguration configuration)
 		{
-			return this._f.Invoke().ToString();
+			object value = this._f.Invoke();
+			if (value is IFormattable formattable)
+			{
+				return formattable.ToString(null, CultureInfo.InvariantCulture);
+			}
+
+			return value?.ToString() ?? string.Empty;
 		}
 	}
 }

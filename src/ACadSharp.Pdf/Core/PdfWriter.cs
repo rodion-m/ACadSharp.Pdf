@@ -48,6 +48,7 @@ namespace ACadSharp.Pdf.Core
 			foreach (PdfPage item in this._document.Pages)
 			{
 				this.writePdfDictionary(item);
+				this.writePdfDictionary(item.DefaultFont);
 				this.writePdfDictionary(item.Contents);
 			}
 
@@ -81,6 +82,12 @@ namespace ACadSharp.Pdf.Core
 		private void writePdfDictionary(PdfDictionary dict)
 		{
 			this._xrefs.Add(this._stream.Position);
+			if (dict is PdfContent content)
+			{
+				this.write(content.GetPdfObjectBytes(this._configuration));
+				return;
+			}
+
 			this.write(dict.GetPdfForm(this._configuration));
 		}
 

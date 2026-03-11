@@ -2,8 +2,11 @@
 using ACadSharp.Objects;
 using ACadSharp.Pdf.Core;
 using ACadSharp.Tables;
+using CSMath;
+using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 
 namespace ACadSharp.Pdf
 {
@@ -115,6 +118,89 @@ namespace ACadSharp.Pdf
 			PdfPage page = this._pdf.Pages.AddPage();
 
 			page.Add(block);
+		}
+
+		/// <summary>
+		/// Add a <see cref="BlockRecord"/> as a page using a caller-provided layout.
+		/// </summary>
+		/// <param name="block">Block to draw.</param>
+		/// <param name="layout">Layout applied to the page.</param>
+		/// <param name="resizeLayout">Resize the layout to fit the entities.</param>
+		/// <returns>The created <see cref="PdfPage"/>.</returns>
+		public PdfPage Add(BlockRecord block, Layout layout, bool resizeLayout)
+		{
+			PdfPage page = this._pdf.Pages.AddPage();
+			page.Layout = layout;
+			page.Add(block, resizeLayout);
+			return page;
+		}
+
+		/// <summary>
+		/// Add a focused model-space window as a page using a synthetic viewport.
+		/// </summary>
+		/// <param name="document">Source drawing.</param>
+		/// <param name="layout">Paper layout used for the page.</param>
+		/// <param name="modelWindow">Finite model-space bounds to render.</param>
+		/// <param name="marginPaperUnits">Additional page margin in the layout paper units.</param>
+		/// <returns>The created <see cref="PdfPage"/>.</returns>
+		public PdfPage AddModelWindow(CadDocument document, Layout layout, BoundingBox modelWindow, double marginPaperUnits = 0.0)
+		{
+			if (document == null)
+			{
+				throw new ArgumentNullException(nameof(document));
+			}
+
+			if (layout == null)
+			{
+				throw new ArgumentNullException(nameof(layout));
+			}
+
+			if (modelWindow.Extent != BoundingBoxExtent.Finite && modelWindow.Extent != BoundingBoxExtent.Point)
+			{
+				throw new ArgumentException("Model window must be finite.", nameof(modelWindow));
+			}
+
+			double rawWidth = Math.Max(0.0, modelWindow.Max.X - modelWindow.Min.X);
+			double rawHeight = Math.Max(0.0, modelWindow.Max.Y - modelWindow.Min.Y);
+			if (rawWidth <= 1e-9 && rawHeight <= 1e-9)
+			{
+				throw new ArgumentException("Model window must have a measurable size.", nameof(modelWindow));
+			}
+
+			double availableWidth = Math.Max(1e-6, layout.PaperWidth - (2.0 * marginPaperUnits));
+			double availableHeight = Math.Max(1e-6, layout.PaperHeight - (2.0 * marginPaperUnits));
+			double sourceAspect = rawWidth <= 1e-9 ? 1.0 : rawWidth / Math.Max(rawHeight, 1e-9);
+			double targetAspect = availableWidth / availableHeight;
+
+			double fittedViewHeight;
+			if (rawWidth <= 1e-9)
+			{
+				fittedViewHeight = rawHeight;
+			}
+			else if (sourceAspect > targetAspect)
+			{
+				fittedViewHeight = rawWidth / targetAspect;
+			}
+			else
+			{
+				fittedViewHeight = Math.Max(rawHeight, rawWidth / targetAspect);
+			}
+
+			var viewport = new Viewport
+			{
+				Center = new XYZ(marginPaperUnits + (availableWidth / 2.0), marginPaperUnits + (availableHeight / 2.0), 0.0),
+				Width = availableWidth,
+				Height = availableHeight,
+				ViewCenter = new XY((modelWindow.Min.X + modelWindow.Max.X) / 2.0, (modelWindow.Min.Y + modelWindow.Max.Y) / 2.0),
+				ViewHeight = Math.Max(fittedViewHeight, 1e-6),
+				ViewDirection = XYZ.AxisZ,
+			};
+
+			PdfPage page = this._pdf.Pages.AddPage();
+			page.Layout = layout;
+			page.ModelEntities.AddRange(document.ModelSpace.Entities.Where(e => e != null));
+			page.Viewports.Add(viewport);
+			return page;
 		}
 
 		/// <summary>

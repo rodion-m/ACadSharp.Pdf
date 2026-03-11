@@ -1,7 +1,8 @@
-﻿using ACadSharp.Objects;
+using ACadSharp.Objects;
 using ACadSharp.Pdf.Core;
 using CSMath;
 using System;
+using System.Globalization;
 
 namespace ACadSharp.Pdf.Extensions
 {
@@ -39,7 +40,12 @@ namespace ACadSharp.Pdf.Extensions
 	{
 		public static string ToPdfString(this Color color)
 		{
-			return $"{color.R / 255d} {color.G / 255d} {color.B / 255d} RG";
+			return string.Format(
+				CultureInfo.InvariantCulture,
+				"{0} {1} {2} RG",
+				color.R / 255d,
+				color.G / 255d,
+				color.B / 255d);
 		}
 	}
 }

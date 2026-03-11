@@ -19,12 +19,16 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 			this._configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
 		}
 
-		public string Render(IReadOnlyList<Viewport> viewports, IReadOnlyList<Entity> paperEntities, out RenderLog log)
+		public string Render(
+			IReadOnlyList<Viewport> viewports,
+			IReadOnlyList<Entity> paperEntities,
+			IReadOnlyList<Entity> modelEntities,
+			out RenderLog log)
 		{
 			log = new RenderLog();
 
 			var resolver = new PropertyResolver(this._configuration, log);
-			var builder = new SceneGraphBuilder(this._layout, this._configuration, resolver, log);
+			var builder = new SceneGraphBuilder(this._layout, this._configuration, resolver, log, modelEntities);
 			var nodes = builder.Build(viewports, paperEntities);
 
 			var flattener = new SceneFlattener(this._layout);
