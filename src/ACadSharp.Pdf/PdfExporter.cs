@@ -87,7 +87,6 @@ namespace ACadSharp.Pdf
 			PdfPage page = this._pdf.Pages.AddPage();
 
 			page.Layout = layout;
-
 			foreach (Entity e in layout.AssociatedBlock.Entities)
 			{
 				if (e is Viewport)

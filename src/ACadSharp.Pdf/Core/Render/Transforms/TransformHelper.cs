@@ -20,7 +20,7 @@ namespace ACadSharp.Pdf.Core.Render.Transforms
 			if (viewport == null) throw new ArgumentNullException(nameof(viewport));
 
 			var boxPaper = viewport.GetBoundingBox();
-			var boxModel = viewport.GetModelBoundingBox();
+			var boxModel = GetViewportModelBoundingBox(viewport);
 
 			double s = viewport.ScaleFactor;
 			var df = boxModel.Min * s;
@@ -31,6 +31,21 @@ namespace ACadSharp.Pdf.Core.Render.Transforms
 
 			// Apply scale first, then translate: (T * S) * p
 			return t * scale;
+		}
+
+		public static BoundingBox GetViewportModelBoundingBox(Viewport viewport)
+		{
+			if (viewport == null) throw new ArgumentNullException(nameof(viewport));
+
+			// For paper-space viewports, ACadSharp's ViewCenter is stored in view coordinates relative
+			// to the viewport target, not as an absolute model-space center. Using it directly drops
+			// the actual publication view on real DWGs and selects only a small legend cluster.
+			double centerX = viewport.ViewCenter.X + viewport.ViewTarget.X;
+			double centerY = viewport.ViewCenter.Y + viewport.ViewTarget.Y;
+
+			XYZ min = new XYZ(centerX - viewport.ViewWidth / 2.0, centerY - viewport.ViewHeight / 2.0, 0.0);
+			XYZ max = new XYZ(centerX + viewport.ViewWidth / 2.0, centerY + viewport.ViewHeight / 2.0, 0.0);
+			return new BoundingBox(min, max);
 		}
 
 		public static double PaperToPdfPoints(double valuePaperUnits, Layout layout)

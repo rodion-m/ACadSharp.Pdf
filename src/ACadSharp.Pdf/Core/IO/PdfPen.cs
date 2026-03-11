@@ -4,6 +4,7 @@ using ACadSharp.IO;
 using ACadSharp.Objects;
 using ACadSharp.Pdf.Extensions;
 using ACadSharp.Pdf.Core.Render.SceneGraph;
+using ACadSharp.Pdf.Core.Render.Transforms;
 using ACadSharp.Tables;
 using CSMath;
 using System;
@@ -20,6 +21,8 @@ namespace ACadSharp.Pdf.Core.IO
 {
 	internal class PdfPen
 	{
+		private const double HairlineThresholdMm = 0.09;
+
 		public double DenominatorScale { get { return this._layout.DenominatorScale; } }
 
 		public PlotPaperUnits PaperUnits { get { return this._layout.PaperUnits; } }
@@ -34,17 +37,19 @@ namespace ACadSharp.Pdf.Core.IO
 		private readonly PdfConfiguration _configuration;
 
 		private readonly Layout _layout;
+		private readonly List<Entity> _modelEntities;
 
 		private readonly StringBuilder _sb = new();
 
 		private readonly UnderlayRasterCache _underlayRasterCache;
 		private BoundingBox? _clipRectPaperOverride;
 
-		public PdfPen(Layout layout, PdfConfiguration configuration)
+		public PdfPen(Layout layout, PdfConfiguration configuration, IEnumerable<Entity> modelEntities = null)
 		{
 			this._layout = layout;
 			this._configuration = configuration;
 			this._underlayRasterCache = new UnderlayRasterCache(configuration);
+			this._modelEntities = modelEntities?.Where(e => e != null).ToList() ?? new List<Entity>();
 		}
 
 		public void DrawEntity(Entity entity)
@@ -146,7 +151,8 @@ namespace ACadSharp.Pdf.Core.IO
 		{
 			LineWeightType lw = entity.GetActiveLineWeightType();
 			double lwValue = lw.GetLineWeightValue();
-			this._sb.AppendLine($"{lwValue.ToPdfUnit(PdfUnitType.Millimeter).ToString(this._configuration.DecimalFormat, CultureInfo.InvariantCulture)} {PdfKey.LineWidth}");
+			double lineWidthPt = lwValue < HairlineThresholdMm ? 0.0 : lwValue.ToPdfUnit(PdfUnitType.Millimeter);
+			this._sb.AppendLine($"{lineWidthPt.ToString(this._configuration.DecimalFormat, CultureInfo.InvariantCulture)} {PdfKey.LineWidth}");
 
 			Color color = entity.GetActiveColor();
 
@@ -280,22 +286,29 @@ namespace ACadSharp.Pdf.Core.IO
 
 		private void drawText(IText text, Transform transform)
 		{
+			XYZ insertPoint = transform.ApplyTransform(text.InsertPoint);
+			double textScale = Math.Max(Math.Abs(transform.Scale.X), Math.Abs(transform.Scale.Y));
+			if (textScale <= 0.0)
+			{
+				textScale = 1.0;
+			}
+
 			this._sb.AppendLine(PdfKey.BasicTextStart);
 
 			this._sb.Append("/F");
 			this._sb.Append("1");   //Font id in the pdf, the font definition should be embedded
 			this._sb.Append(' ');
-			this._sb.Append(this.toPdfDouble(text.Height));
+			this._sb.Append(this.toPdfDouble(text.Height * textScale));
 			this._sb.Append(' ');
 			this._sb.Append(PdfKey.TypeFont);
 			this._sb.AppendLine();
 
-			this.appendXY(text.InsertPoint, "Td");
+			this.appendXY(insertPoint, "Td");
 
 			switch (text)
 			{
 				case MText mtext:
-					this._sb.AppendLine($"{this.toPdfDouble(text.Height)} TL");
+					this._sb.AppendLine($"{this.toPdfDouble(text.Height * textScale)} TL");
 					foreach (var l in mtext.GetTextLines())
 					{
 						this._sb.AppendLine($"T* ({escapePdfString(l)}) {PdfKey.TextString}");
@@ -327,7 +340,7 @@ namespace ACadSharp.Pdf.Core.IO
 			this.appendArray(PdfKey.Rectangle, box.Min.X, box.Min.Y, box.LengthX, box.LengthY);
 			this._sb.AppendLine("W n");
 
-			var modelBox = viewport.GetModelBoundingBox();
+			var modelBox = TransformHelper.GetViewportModelBoundingBox(viewport);
 
 			var df = modelBox.Min * viewport.ScaleFactor;
 
@@ -354,19 +367,27 @@ namespace ACadSharp.Pdf.Core.IO
 
 		private IEnumerable<Entity> selectViewportEntities(Viewport viewport)
 		{
-			if (viewport == null || viewport.Document == null)
+			if (viewport == null)
 			{
 				yield break;
 			}
 
-			BoundingBox viewBox = viewport.GetModelBoundingBox();
+			IEnumerable<Entity> sourceEntities = viewport.Document != null
+				? viewport.Document.Entities
+				: this._modelEntities;
+			if (sourceEntities == null)
+			{
+				yield break;
+			}
+
+			BoundingBox viewBox = TransformHelper.GetViewportModelBoundingBox(viewport);
 			BoundingBox clipRect = viewBox;
 			if (tryCreateExpandedRect((XY)viewBox.Min, (XY)viewBox.Max, out BoundingBox expanded))
 			{
 				clipRect = expanded;
 			}
 
-			foreach (Entity entity in viewport.Document.Entities)
+			foreach (Entity entity in sourceEntities)
 			{
 				if (entity == null)
 				{

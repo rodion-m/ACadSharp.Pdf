@@ -101,7 +101,7 @@ namespace ACadSharp.Pdf.Core
 			}
 			else
 			{
-				PdfPen pen = new PdfPen(this.Layout, configuration);
+				PdfPen pen = new PdfPen(this.Layout, configuration, this.Owner.ModelEntities);
 
 				foreach (Viewport v in this.Owner.Viewports)
 				{
@@ -175,18 +175,47 @@ namespace ACadSharp.Pdf.Core
 
 		private static byte[] compress(byte[] data)
 		{
-			if (data == null || data.Length == 0)
+			if (data == null)
 			{
-				return Array.Empty<byte>();
+				data = Array.Empty<byte>();
 			}
 
-			using MemoryStream output = new MemoryStream();
-			using (DeflateStream deflate = new DeflateStream(output, CompressionLevel.Optimal, leaveOpen: true))
+			using MemoryStream rawDeflate = new MemoryStream();
+			using (DeflateStream deflate = new DeflateStream(rawDeflate, CompressionLevel.Optimal, leaveOpen: true))
 			{
 				deflate.Write(data, 0, data.Length);
 			}
 
-			return output.ToArray();
+			byte[] compressed = rawDeflate.ToArray();
+			uint adler32 = computeAdler32(data);
+			byte[] zlib = new byte[2 + compressed.Length + 4];
+
+			// PDF FlateDecode expects a zlib-wrapped deflate stream, not raw deflate bytes.
+			zlib[0] = 0x78;
+			zlib[1] = 0x9C;
+			Buffer.BlockCopy(compressed, 0, zlib, 2, compressed.Length);
+
+			int checksumIndex = zlib.Length - 4;
+			zlib[checksumIndex] = (byte)((adler32 >> 24) & 0xFF);
+			zlib[checksumIndex + 1] = (byte)((adler32 >> 16) & 0xFF);
+			zlib[checksumIndex + 2] = (byte)((adler32 >> 8) & 0xFF);
+			zlib[checksumIndex + 3] = (byte)(adler32 & 0xFF);
+			return zlib;
+		}
+
+		private static uint computeAdler32(byte[] data)
+		{
+			const uint mod = 65521;
+			uint a = 1;
+			uint b = 0;
+
+			foreach (byte item in data)
+			{
+				a = (a + item) % mod;
+				b = (b + a) % mod;
+			}
+
+			return (b << 16) | a;
 		}
 	}
 }

@@ -12,6 +12,8 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 	{
 		private const double Epsilon = 1e-9;
 		private const double AreaEpsilon = 1e-9;
+		private const double SolidFillOpacity = 0.42;
+		private const double PatternStrokeOpacity = 0.55;
 		private const int MaxPatternLinesPerFamily = 6000;
 		private const int MaxVisiblePatternSegments = 200000;
 		private const int MaxDashIntervalsPerLine = 2000;
@@ -88,14 +90,14 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 
 			if (isGradient(hatch))
 			{
-				ACadSharp.Color fillColor = resolveGradientPrimaryColor(hatch, style.Color);
+				ACadSharp.Color fillColor = screenToWhite(resolveGradientPrimaryColor(hatch, style.Color), SolidFillOpacity);
 				this._log.Add(hatch.Handle, hatch.SubclassMarker, RenderStatus.Rendered, "Gradient HATCH approximated as solid fill.");
 				return renderSolidFill(hatch, loops, fillColor);
 			}
 
 			if (isSolid(hatch))
 			{
-				return renderSolidFill(hatch, loops, style.Color);
+				return renderSolidFill(hatch, loops, screenToWhite(style.Color, SolidFillOpacity));
 			}
 
 			return renderPatternFill(hatch, loops, style);
@@ -286,7 +288,7 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 			}
 
 			var stroke = new StrokeStyle(
-				style.Color,
+				screenToWhite(style.Color, PatternStrokeOpacity),
 				Math.Max(style.WidthPt, 0.01),
 				Array.Empty<double>(),
 				0.0);
@@ -700,6 +702,36 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 				default:
 					return Array.Empty<HatchPattern.Line>();
 			}
+		}
+
+		private static ACadSharp.Color screenToWhite(ACadSharp.Color color, double opacity)
+		{
+			if (opacity >= 0.999)
+			{
+				return color;
+			}
+
+			if (opacity <= 0.0)
+			{
+				return new ACadSharp.Color(255, 255, 255);
+			}
+
+			byte composite(byte channel)
+			{
+				double value = (channel * opacity) + (255.0 * (1.0 - opacity));
+				if (value < 0.0)
+				{
+					value = 0.0;
+				}
+				if (value > 255.0)
+				{
+					value = 255.0;
+				}
+
+				return (byte)Math.Round(value);
+			}
+
+			return new ACadSharp.Color(composite(color.R), composite(color.G), composite(color.B));
 		}
 
 		private static HatchPattern.Line makePatternLine(double angleDeg, double baseX, double baseY, double offsetX, double offsetY, params double[] dashes)

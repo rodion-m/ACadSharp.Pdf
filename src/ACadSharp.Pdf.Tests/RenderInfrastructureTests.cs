@@ -103,6 +103,32 @@ namespace ACadSharp.Pdf.Tests
 		}
 
 		[Fact]
+		public void ResolveStroke_TinyLineWeightsUsePdfHairline()
+		{
+			var config = new PdfConfiguration();
+			var log = new ACadSharp.Pdf.Core.Render.RenderLog();
+			var resolver = new PropertyResolver(config, log);
+
+			var layout = new Layout("L")
+			{
+				PaperUnits = PlotPaperUnits.Millimeters,
+				DenominatorScale = 1.0,
+			};
+
+			var layer = new Layer("0") { Color = new Color((short)5) };
+			var line = new Line
+			{
+				StartPoint = XYZ.Zero,
+				EndPoint = XY.AxisX.Convert<XYZ>(),
+				Layer = layer,
+				LineWeight = LineWeightType.W5,
+			};
+
+			var stroke = resolver.ResolveStroke(line, layout);
+			Assert.Equal(0.0, stroke.WidthPt);
+		}
+
+		[Fact]
 		public void ResolveStroke_LineWeightNotScaledByGeometry()
 		{
 			var config = new PdfConfiguration();

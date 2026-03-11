@@ -1,6 +1,5 @@
 using ACadSharp.Entities;
 using ACadSharp.IO;
-using System.IO.Compression;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -169,11 +168,7 @@ namespace ACadSharp.Pdf.Tests.Integration
 
 		private static byte[] decompress(byte[] compressed)
 		{
-			using var input = new MemoryStream(compressed);
-			using var deflate = new DeflateStream(input, CompressionMode.Decompress);
-			using var output = new MemoryStream();
-			deflate.CopyTo(output);
-			return output.ToArray();
+			return PdfStreamDecoding.DecodeFlatePayload(compressed);
 		}
 	}
 }

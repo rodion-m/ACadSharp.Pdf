@@ -4,9 +4,9 @@ using ACadSharp.Objects;
 using ACadSharp.Pdf;
 using ACadSharp.Pdf.Core;
 using ACadSharp.Tables;
+using ACadSharp.Pdf.Core.Render.Transforms;
 using CSMath;
 using System;
-using System.IO.Compression;
 using System.Text;
 using System.IO;
 using System.Linq;
@@ -16,6 +16,26 @@ namespace ACadSharp.Pdf.Tests
 {
 	public class FocusedModelWindowTests
 	{
+		[Fact]
+		public void ViewportModelBoundingBox_UsesTargetPlusViewCenter()
+		{
+			var viewport = new Viewport
+			{
+				Width = 279.5,
+				Height = 142.5,
+				ViewCenter = new XY(-6616.771, -2519.712),
+				ViewTarget = new XYZ(2722.610, 588.819, 0.0),
+				ViewHeight = 142.5,
+			};
+
+			BoundingBox box = TransformHelper.GetViewportModelBoundingBox(viewport);
+
+			Assert.Equal(-4033.911, box.Min.X, 3);
+			Assert.Equal(-2002.143, box.Min.Y, 3);
+			Assert.Equal(-3754.411, box.Max.X, 3);
+			Assert.Equal(-1859.643, box.Max.Y, 3);
+		}
+
 		[Fact]
 		public void AddModelWindow_RendersOnlyFocusedWindow()
 		{
@@ -173,7 +193,7 @@ namespace ACadSharp.Pdf.Tests
 		}
 
 		[Fact]
-		public void Export_WritesCompressedContentStreamWithDeclaredFilter()
+		public void Export_WritesZlibWrappedContentStreamWithDeclaredFilter()
 		{
 			var doc = new CadDocument();
 			doc.Entities.Add(new Line { StartPoint = XYZ.Zero, EndPoint = new XYZ(100, 0, 0) });
@@ -203,6 +223,7 @@ namespace ACadSharp.Pdf.Tests
 
 			Assert.Contains("/Filter /FlateDecode", pdfText);
 			byte[] streamPayload = extractFirstStreamPayload(pdfBytes);
+			Assert.Equal(0x78, streamPayload[0]);
 			string decompressed = decompress(streamPayload);
 			Assert.Contains("W n", decompressed);
 		}
@@ -287,11 +308,7 @@ namespace ACadSharp.Pdf.Tests
 
 		private static string decompress(byte[] compressed)
 		{
-			using var input = new MemoryStream(compressed);
-			using var deflate = new DeflateStream(input, CompressionMode.Decompress);
-			using var output = new MemoryStream();
-			deflate.CopyTo(output);
-			return Encoding.ASCII.GetString(output.ToArray());
+			return Encoding.ASCII.GetString(PdfStreamDecoding.DecodeFlatePayload(compressed));
 		}
 	}
 }

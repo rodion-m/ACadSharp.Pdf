@@ -1,8 +1,11 @@
 using ACadSharp.Entities;
+using ACadSharp.Extensions;
 using ACadSharp.IO;
 using ACadSharp.Pdf.Core;
 using ACadSharp.Objects;
 using ACadSharp.Pdf.Core.Render;
+using ACadSharp.Pdf.Core.Render.Transforms;
+using ACadSharp.Pdf.Verification;
 using CSMath;
 using System;
 using System.Collections.Generic;
@@ -36,7 +39,14 @@ namespace ACadSharp.Pdf.Examples
 
 			if (options.ExportPaperLayouts)
 			{
-				exporter.AddPaperLayouts(doc);
+				if (options.VerificationMode == VerificationMode.PublicationSheet)
+				{
+					addPublicationSheet(exporter, doc);
+				}
+				else
+				{
+					exporter.AddPaperLayouts(doc);
+				}
 			}
 
 			exporter.Close();
@@ -58,14 +68,29 @@ namespace ACadSharp.Pdf.Examples
 			}
 
 			BoundingBox limits;
+			PreviewExtentsSelection extentsSelection;
 			if (options.TryGetWindow(out BoundingBox explicitWindow))
 			{
 				limits = explicitWindow;
+				extentsSelection = new PreviewExtentsSelection(
+					explicitWindow,
+					"explicit-window",
+					0,
+					0,
+					Array.Empty<string>(),
+					0,
+					1,
+					0.0,
+					Array.Empty<PreviewExtentsExclusion>());
 			}
-			else if (!tryComputeExtents(doc.ModelSpace.Entities, options.FocusHandles, options.FocusPaddingModelUnits, out limits))
+			else if (!PreviewExtentsSelector.TrySelect(doc.ModelSpace.Entities, options.FocusHandles, options.FocusPaddingModelUnits, out extentsSelection))
 			{
 				exporter.AddModelSpace(doc);
 				return null;
+			}
+			else
+			{
+				limits = extentsSelection.Limits;
 			}
 
 			var layout = new Layout("ModelPreview")
@@ -78,6 +103,13 @@ namespace ACadSharp.Pdf.Examples
 			};
 
 			PdfPage page = exporter.AddModelWindow(doc, layout, limits, options.MarginMm);
+			if (extentsSelection?.IncludedHandles?.Count > 0)
+			{
+				HashSet<string> includedHandles = new HashSet<string>(extentsSelection.IncludedHandles, StringComparer.OrdinalIgnoreCase);
+				page.ModelEntities.Clear();
+				page.ModelEntities.AddRange(doc.ModelSpace.Entities.Where(e => e != null && includedHandles.Contains(e.Handle.ToString("X"))));
+			}
+
 			Viewport previewViewport = page.Viewports.Single();
 
 			return new PreviewLayoutPlan
@@ -87,6 +119,7 @@ namespace ACadSharp.Pdf.Examples
 				MarginMm = options.MarginMm,
 				FocusHandles = options.FocusHandles.ToArray(),
 				FocusPaddingModelUnits = options.FocusPaddingModelUnits,
+				ExtentsSelection = createPreviewSelectionSummary(extentsSelection),
 				DenominatorScale = previewViewport.ViewHeight / previewViewport.Height,
 				MinX = limits.Min.X,
 				MinY = limits.Min.Y,
@@ -100,66 +133,123 @@ namespace ACadSharp.Pdf.Examples
 			};
 		}
 
-		private static bool tryComputeExtents(IEnumerable<Entity> entities, IReadOnlyCollection<string> focusHandles, double focusPaddingModelUnits, out BoundingBox limits)
+		private static void addPublicationSheet(PdfExporter exporter, CadDocument doc)
 		{
-			limits = BoundingBox.Null;
-			HashSet<string> normalizedHandles = new HashSet<string>(
-				(focusHandles ?? Array.Empty<string>())
-					.Where(h => !string.IsNullOrWhiteSpace(h))
-					.Select(h => h.Trim().ToUpperInvariant()));
+			Layout layout = doc.Layouts.FirstOrDefault(l => l.IsPaperSpace);
+			if (layout == null)
+			{
+				return;
+			}
 
-			foreach (Entity entity in entities ?? Array.Empty<Entity>())
+			List<Viewport> publicationViewports = layout.Viewports
+				.Where(vp => vp != null && !vp.RepresentsPaper)
+				.ToList();
+			if (publicationViewports.Count == 0)
+			{
+				exporter.Add(layout);
+				return;
+			}
+
+			Viewport mainViewport = publicationViewports
+				.OrderByDescending(vp => estimateViewportModelCoverage(doc.ModelSpace.Entities, vp))
+				.ThenByDescending(vp => vp.Width * vp.Height)
+				.First();
+
+			BoundingBox modelWindow = TransformHelper.GetViewportModelBoundingBox(mainViewport);
+			Layout sheetLayout = layout;
+
+			double pageWidth = rotatedPaperWidth(sheetLayout);
+			double pageHeight = rotatedPaperHeight(sheetLayout);
+			double margin = 10.0;
+			double availableHeight = Math.Max(40.0, pageHeight - (2.0 * margin));
+			double availableWidth = Math.Max(40.0, pageWidth - (2.0 * margin));
+
+			PdfPage page = exporter.AddModelWindow(
+				doc,
+				sheetLayout,
+				modelWindow,
+				marginPaperUnits: 0.0);
+
+			Viewport syntheticViewport = page.Viewports.Single();
+			syntheticViewport.Center = new XYZ(pageWidth / 2.0, pageHeight / 2.0, 0.0);
+			syntheticViewport.Width = availableWidth;
+			syntheticViewport.Height = availableHeight;
+		}
+
+		private static int estimateViewportModelCoverage(IEnumerable<Entity> entities, Viewport viewport)
+		{
+			if (entities == null || viewport == null)
+			{
+				return 0;
+			}
+
+			BoundingBox box = TransformHelper.GetViewportModelBoundingBox(viewport);
+			int count = 0;
+			foreach (Entity entity in entities)
 			{
 				if (entity == null)
 				{
 					continue;
 				}
 
-				if (normalizedHandles.Count > 0)
+				BoundingBox entityBox = entity.GetBoundingBox();
+				if (entityBox.Extent == BoundingBoxExtent.Infinite)
 				{
-					string handle = entity.Handle.ToString("X");
-					if (!normalizedHandles.Contains(handle))
+					if (entity is Insert)
 					{
-						continue;
+						count++;
 					}
-				}
-
-				BoundingBox box;
-				try
-				{
-					box = entity.GetBoundingBox();
-				}
-				catch
-				{
 					continue;
 				}
 
-				if (box.Extent != BoundingBoxExtent.Finite && box.Extent != BoundingBoxExtent.Point)
+				if (box.IsIn(entityBox, out bool partialIn) || partialIn)
 				{
-					continue;
+					count++;
 				}
-
-				if (!isFinite(box.Min.X) || !isFinite(box.Min.Y) || !isFinite(box.Max.X) || !isFinite(box.Max.Y))
-				{
-					continue;
-				}
-
-				limits = limits.Merge(box);
 			}
 
-			if (limits.Extent != BoundingBoxExtent.Null && focusPaddingModelUnits > 0.0)
-			{
-				limits = new BoundingBox(
-					new XYZ(limits.Min.X - focusPaddingModelUnits, limits.Min.Y - focusPaddingModelUnits, limits.Min.Z),
-					new XYZ(limits.Max.X + focusPaddingModelUnits, limits.Max.Y + focusPaddingModelUnits, limits.Max.Z));
-			}
-
-			return limits.Extent != BoundingBoxExtent.Null;
+			return count;
 		}
 
-		private static bool isFinite(double value)
+		private static double rotatedPaperWidth(Layout layout)
 		{
-			return !double.IsNaN(value) && !double.IsInfinity(value);
+			return layout.PaperRotation == PlotRotation.Degrees90 || layout.PaperRotation == PlotRotation.Degrees270
+				? layout.PaperHeight
+				: layout.PaperWidth;
+		}
+
+		private static double rotatedPaperHeight(Layout layout)
+		{
+			return layout.PaperRotation == PlotRotation.Degrees90 || layout.PaperRotation == PlotRotation.Degrees270
+				? layout.PaperWidth
+				: layout.PaperHeight;
+		}
+
+		private static PreviewExtentsSelectionSummary createPreviewSelectionSummary(PreviewExtentsSelection selection)
+		{
+			if (selection == null)
+			{
+				return null;
+			}
+
+			return new PreviewExtentsSelectionSummary
+			{
+				Strategy = selection.Strategy,
+				CandidateCount = selection.CandidateCount,
+				IncludedCount = selection.IncludedCount,
+				FilteredByHandleCount = selection.FilteredByHandleCount,
+				ClusterCount = selection.ClusterCount,
+				ConnectionDistance = selection.ConnectionDistance,
+				ExcludedEntities = selection.ExcludedEntities
+					.Select(e => new PreviewExtentsExclusionSummary
+					{
+						Handle = e.Handle,
+						EntityType = e.EntityType,
+						Reason = e.Reason,
+						GapDistance = e.GapDistance,
+					})
+					.ToArray(),
+			};
 		}
 
 		private static CadDocument loadDocument(string path, NotificationCollector notifications)
@@ -235,6 +325,7 @@ namespace ACadSharp.Pdf.Examples
 				input = options.InputPath,
 				outputPdf = options.OutputPdfPath,
 				sceneGraph = options.UseSceneGraph,
+				verificationMode = options.GetVerificationModeName(),
 				exportModelSpace = options.ExportModelSpace,
 				exportPaperLayouts = options.ExportPaperLayouts,
 				fitModelToPaper = options.FitModelToPaper,
@@ -272,6 +363,7 @@ namespace ACadSharp.Pdf.Examples
 			public double MarginMm { get; set; }
 			public string[] FocusHandles { get; set; }
 			public double FocusPaddingModelUnits { get; set; }
+			public PreviewExtentsSelectionSummary ExtentsSelection { get; set; }
 			public double DenominatorScale { get; set; }
 			public double MinX { get; set; }
 			public double MinY { get; set; }
@@ -284,8 +376,43 @@ namespace ACadSharp.Pdf.Examples
 			public double ViewHeight { get; set; }
 		}
 
+		private sealed class PreviewExtentsSelectionSummary
+		{
+			public string Strategy { get; set; }
+			public int CandidateCount { get; set; }
+			public int IncludedCount { get; set; }
+			public int FilteredByHandleCount { get; set; }
+			public int ClusterCount { get; set; }
+			public double ConnectionDistance { get; set; }
+			public PreviewExtentsExclusionSummary[] ExcludedEntities { get; set; }
+		}
+
+		private sealed class PreviewExtentsExclusionSummary
+		{
+			public string Handle { get; set; }
+			public string EntityType { get; set; }
+			public string Reason { get; set; }
+			public double? GapDistance { get; set; }
+		}
+
 		private sealed class Options
 		{
+			private static readonly IReadOnlyDictionary<string, (double WidthMm, double HeightMm)> _paperFormats =
+				new Dictionary<string, (double WidthMm, double HeightMm)>(StringComparer.OrdinalIgnoreCase)
+				{
+					["A0"] = (841.0, 1189.0),
+					["A1"] = (594.0, 841.0),
+					["A2"] = (420.0, 594.0),
+					["A3"] = (297.0, 420.0),
+					["A4"] = (210.0, 297.0),
+					["A5"] = (148.0, 210.0),
+					["A6"] = (105.0, 148.0),
+					["A7"] = (74.0, 105.0),
+					["A8"] = (52.0, 74.0),
+					["A9"] = (37.0, 52.0),
+					["A10"] = (26.0, 37.0),
+				};
+
 			public string InputPath { get; private set; }
 			public string OutputPdfPath { get; private set; }
 			public string ReportPath { get; private set; }
@@ -293,12 +420,15 @@ namespace ACadSharp.Pdf.Examples
 			public bool ExportModelSpace { get; private set; } = true;
 			public bool ExportPaperLayouts { get; private set; }
 			public bool FitModelToPaper { get; private set; } = true;
-			public double PaperWidthMm { get; private set; } = 1189.0;
-			public double PaperHeightMm { get; private set; } = 841.0;
-			public double MarginMm { get; private set; } = 10.0;
+			public VerificationMode VerificationMode { get; private set; } = VerificationMode.ModelAudit;
+			public double PaperWidthMm { get; private set; } = 420.0;
+			public double PaperHeightMm { get; private set; } = 297.0;
+			public double MarginMm { get; private set; } = 2.0;
 			public List<string> FocusHandles { get; } = new List<string>();
-			public double FocusPaddingModelUnits { get; private set; } = 200.0;
+			public double FocusPaddingModelUnits { get; private set; } = 25.0;
 			public BoundingBox? ExplicitWindow { get; private set; }
+
+			private bool _verificationModeExplicitlySet;
 
 			public static Options Parse(IReadOnlyList<string> args)
 			{
@@ -322,11 +452,18 @@ namespace ACadSharp.Pdf.Examples
 							string pipeline = requireValue(args, ref i, arg);
 							options.UseSceneGraph = !string.Equals(pipeline, "legacy", StringComparison.OrdinalIgnoreCase);
 							break;
+						case "--verification-mode":
+							options.VerificationMode = parseVerificationMode(requireValue(args, ref i, arg));
+							options._verificationModeExplicitlySet = true;
+							break;
 						case "--mode":
 							applyMode(options, requireValue(args, ref i, arg));
 							break;
 						case "--full-scale":
 							options.FitModelToPaper = false;
+							break;
+						case "--paper-format":
+							applyPaperFormat(options, requireValue(args, ref i, arg));
 							break;
 						case "--paper-width-mm":
 							options.PaperWidthMm = double.Parse(requireValue(args, ref i, arg), System.Globalization.CultureInfo.InvariantCulture);
@@ -361,6 +498,7 @@ namespace ACadSharp.Pdf.Examples
 					printUsageAndExit(1);
 				}
 
+				options.finalizeVerificationMode();
 				options.InputPath = Path.GetFullPath(options.InputPath);
 				options.OutputPdfPath ??= Path.ChangeExtension(options.InputPath, options.UseSceneGraph ? ".scenegraph.pdf" : ".legacy.pdf");
 				options.OutputPdfPath = Path.GetFullPath(options.OutputPdfPath);
@@ -370,6 +508,17 @@ namespace ACadSharp.Pdf.Examples
 				}
 
 				return options;
+			}
+
+			public string GetVerificationModeName()
+			{
+				return this.VerificationMode switch
+				{
+					VerificationMode.ModelAudit => "model-audit",
+					VerificationMode.PublicationSheet => "publication-sheet",
+					VerificationMode.FocusedWindow => "focused-window",
+					_ => "model-audit",
+				};
 			}
 
 			public bool TryGetWindow(out BoundingBox window)
@@ -405,6 +554,82 @@ namespace ACadSharp.Pdf.Examples
 				}
 			}
 
+			private static void applyPaperFormat(Options options, string formatValue)
+			{
+				string value = (formatValue ?? string.Empty).Trim();
+				if (string.IsNullOrWhiteSpace(value))
+				{
+					throw new ArgumentException("Paper format must not be empty.");
+				}
+
+				bool landscape = true;
+				string format = value;
+				string normalized = value.Replace('_', '-');
+
+				if (normalized.EndsWith("-portrait", StringComparison.OrdinalIgnoreCase) ||
+					normalized.EndsWith(":portrait", StringComparison.OrdinalIgnoreCase))
+				{
+					landscape = false;
+					format = stripPaperOrientationSuffix(normalized, "portrait");
+				}
+				else if (normalized.EndsWith("-landscape", StringComparison.OrdinalIgnoreCase) ||
+					normalized.EndsWith(":landscape", StringComparison.OrdinalIgnoreCase))
+				{
+					landscape = true;
+					format = stripPaperOrientationSuffix(normalized, "landscape");
+				}
+
+				if (!_paperFormats.TryGetValue(format, out var size))
+				{
+					throw new ArgumentException($"Unknown paper format: {formatValue}");
+				}
+
+				options.PaperWidthMm = landscape ? Math.Max(size.WidthMm, size.HeightMm) : Math.Min(size.WidthMm, size.HeightMm);
+				options.PaperHeightMm = landscape ? Math.Min(size.WidthMm, size.HeightMm) : Math.Max(size.WidthMm, size.HeightMm);
+			}
+
+			private void finalizeVerificationMode()
+			{
+				if (!this._verificationModeExplicitlySet)
+				{
+					if (this.ExplicitWindow.HasValue || this.FocusHandles.Count > 0)
+					{
+						this.VerificationMode = VerificationMode.FocusedWindow;
+					}
+					else if (this.ExportPaperLayouts && !this.ExportModelSpace)
+					{
+						this.VerificationMode = VerificationMode.PublicationSheet;
+					}
+					else
+					{
+						this.VerificationMode = VerificationMode.ModelAudit;
+					}
+
+					return;
+				}
+
+				switch (this.VerificationMode)
+				{
+					case VerificationMode.ModelAudit:
+						this.ExportModelSpace = true;
+						this.ExportPaperLayouts = false;
+						break;
+					case VerificationMode.PublicationSheet:
+						this.ExportModelSpace = false;
+						this.ExportPaperLayouts = true;
+						break;
+					case VerificationMode.FocusedWindow:
+						this.ExportModelSpace = true;
+						this.ExportPaperLayouts = false;
+						this.FitModelToPaper = true;
+						if (!this.ExplicitWindow.HasValue && this.FocusHandles.Count == 0)
+						{
+							throw new ArgumentException("focused-window verification requires --window or --focus-handle.");
+						}
+						break;
+				}
+			}
+
 			private static string requireValue(IReadOnlyList<string> args, ref int index, string arg)
 			{
 				if (index + 1 >= args.Count)
@@ -427,10 +652,41 @@ namespace ACadSharp.Pdf.Examples
 					new XYZ(Math.Max(minX, maxX), Math.Max(minY, maxY), 0.0));
 			}
 
+			private static VerificationMode parseVerificationMode(string value)
+			{
+				switch ((value ?? string.Empty).Trim().ToLowerInvariant())
+				{
+					case "model-audit":
+						return VerificationMode.ModelAudit;
+					case "publication-sheet":
+						return VerificationMode.PublicationSheet;
+					case "focused-window":
+						return VerificationMode.FocusedWindow;
+					default:
+						throw new ArgumentException($"Unknown verification mode: {value}");
+				}
+			}
+
+			private static string stripPaperOrientationSuffix(string value, string suffix)
+			{
+				string trim = value;
+				if (trim.EndsWith($":{suffix}", StringComparison.OrdinalIgnoreCase))
+				{
+					return trim[..^(suffix.Length + 1)];
+				}
+
+				if (trim.EndsWith($"-{suffix}", StringComparison.OrdinalIgnoreCase))
+				{
+					return trim[..^(suffix.Length + 1)];
+				}
+
+				return trim;
+			}
+
 			private static void printUsageAndExit(int code)
 			{
 				Console.WriteLine("Usage:");
-				Console.WriteLine("  ACadSharp.Pdf.Examples --input <file.dwg|file.dxf> [--output <file.pdf>] [--report <file.json>] [--pipeline scenegraph|legacy] [--mode model|layouts|both] [--full-scale] [--paper-width-mm <n>] [--paper-height-mm <n>] [--margin-mm <n>] [--focus-handle <HEX>] [--focus-padding-model <n>] [--window <minX> <minY> <maxX> <maxY>]");
+				Console.WriteLine("  ACadSharp.Pdf.Examples --input <file.dwg|file.dxf> [--output <file.pdf>] [--report <file.json>] [--pipeline scenegraph|legacy] [--verification-mode model-audit|publication-sheet|focused-window] [--mode model|layouts|both] [--full-scale] [--paper-format A3|A3-portrait|A3-landscape] [--paper-width-mm <n>] [--paper-height-mm <n>] [--margin-mm <n>] [--focus-handle <HEX>] [--focus-padding-model <n>] [--window <minX> <minY> <maxX> <maxY>]");
 				Environment.Exit(code);
 			}
 		}

@@ -32,6 +32,8 @@ namespace ACadSharp.Pdf.Core.Render.Style
 
 	public sealed class PropertyResolver
 	{
+		private const double HairlineThresholdMm = 0.09;
+
 		private readonly PdfConfiguration _configuration;
 		private readonly RenderLog _log;
 
@@ -154,6 +156,11 @@ namespace ACadSharp.Pdf.Core.Render.Style
 			}
 
 			double mm = lineWeightToMm(lw);
+			if (mm > 0.0 && mm < HairlineThresholdMm)
+			{
+				return 0.0;
+			}
+
 			return mm.ToPdfUnit(PdfUnitType.Millimeter);
 		}
 

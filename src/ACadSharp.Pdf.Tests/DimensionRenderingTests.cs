@@ -254,6 +254,76 @@ namespace ACadSharp.Pdf.Tests
 			Assert.DoesNotContain("(SHOULD-NOT-RENDER) Tj", content);
 		}
 
+		[Fact]
+		public void DimensionAnonymousBlock_InheritsDimensionColorForByBlockChildren()
+		{
+			var doc = new CadDocument();
+			var block = new BlockRecord("*D2");
+			block.Entities.Add(new Line
+			{
+				StartPoint = new XYZ(7, 8, 0),
+				EndPoint = new XYZ(9, 8, 0),
+				Color = Color.ByBlock,
+				LineWeight = LineWeightType.ByBlock,
+				LineType = LineType.ByBlock,
+			});
+			doc.BlockRecords.Add(block);
+
+			var dim = new DimensionLinear
+			{
+				FirstPoint = new XYZ(0, 0, 0),
+				SecondPoint = new XYZ(100, 0, 0),
+				DefinitionPoint = new XYZ(100, 20, 0),
+				Block = block,
+				Color = new Color((short)5),
+				LineWeight = LineWeightType.W15,
+			};
+			doc.Entities.Add(dim);
+
+			string content = renderEntity(dim, out RenderLog _);
+
+			Assert.Contains("0 0 1 RG", content);
+			Assert.Contains("7 8 m", content);
+			Assert.Contains("9 8 l", content);
+		}
+
+		[Fact]
+		public void DimensionOnCartogramLayer_PrefersComputedGeometryOverAnonymousBlock()
+		{
+			var doc = new CadDocument();
+			var block = new BlockRecord("*D3");
+			block.Entities.Add(new Line
+			{
+				StartPoint = new XYZ(7, 8, 0),
+				EndPoint = new XYZ(9, 8, 0),
+			});
+			doc.BlockRecords.Add(block);
+
+			var layer = new Layer("Картограмма")
+			{
+				Color = new Color((short)5),
+			};
+			doc.Layers.Add(layer);
+
+			var dim = new DimensionLinear
+			{
+				FirstPoint = new XYZ(0, 0, 0),
+				SecondPoint = new XYZ(100, 0, 0),
+				DefinitionPoint = new XYZ(100, 20, 0),
+				Text = "DIM-CALC",
+				Block = block,
+				Layer = layer,
+			};
+			doc.Entities.Add(dim);
+
+			string content = renderEntity(dim, out RenderLog _);
+
+			Assert.DoesNotContain("7 8 m", content);
+			Assert.Contains("0 20 m", content);
+			Assert.Contains("100 20 l", content);
+			Assert.Contains("(DIM-CALC) Tj", content);
+		}
+
 		private static string renderEntity(Entity entity, out RenderLog log)
 		{
 			var pdf = new PdfDocument();

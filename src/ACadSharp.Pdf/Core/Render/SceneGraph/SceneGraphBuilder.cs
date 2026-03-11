@@ -177,7 +177,7 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 				throw new InvalidOperationException("Viewport needs either an assigned document or explicit model entities.");
 			}
 
-			BoundingBox viewBox = viewport.GetModelBoundingBox();
+			BoundingBox viewBox = TransformHelper.GetViewportModelBoundingBox(viewport);
 
 			BoundingBox clipRect = viewBox;
 			if (tryCreateExpandedClipRect((XY)viewBox.Min, (XY)viewBox.Max, out BoundingBox expanded))
@@ -799,12 +799,17 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 				return true;
 			}
 
+			if (!canReliablyCullInsertChildren(viewport))
+			{
+				return true;
+			}
+
 			if (entity is Ray || entity is XLine)
 			{
 				return true;
 			}
 
-			BoundingBox viewportBox = viewport.GetModelBoundingBox();
+			BoundingBox viewportBox = TransformHelper.GetViewportModelBoundingBox(viewport);
 			if (tryCreateExpandedClipRect((XY)viewportBox.Min, (XY)viewportBox.Max, out BoundingBox expandedViewport))
 			{
 				viewportBox = expandedViewport;
@@ -825,6 +830,21 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 			{
 				return true;
 			}
+		}
+
+		private static bool canReliablyCullInsertChildren(Viewport viewport)
+		{
+			if (viewport == null)
+			{
+				return false;
+			}
+
+			if (Math.Abs(viewport.TwistAngle) > 1e-9)
+			{
+				return false;
+			}
+
+			return viewport.ViewDirection == XYZ.AxisZ || viewport.ViewDirection == XYZ.Zero;
 		}
 
 		private PathNode buildLine(Line line, double styleScaleToPaper, InsertRenderContext? containingInsert)
@@ -922,7 +942,7 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 		{
 			if (viewport != null)
 			{
-				BoundingBox viewportBox = viewport.GetModelBoundingBox();
+				BoundingBox viewportBox = TransformHelper.GetViewportModelBoundingBox(viewport);
 				if (tryCreateExpandedClipRect((XY)viewportBox.Min, (XY)viewportBox.Max, out BoundingBox expandedViewport))
 				{
 					return expandedViewport;
@@ -2691,7 +2711,8 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 				return null;
 			}
 
-			if (tryBuildDimensionFromAnonymousBlock(dimension, viewport, styleScaleToPaper, textScaleToPaper, containingInsert, parentTransform, depth, activeBlocks, out RenderNode blockNode))
+			if (!shouldPreferComputedDimensionGeometry(dimension)
+				&& tryBuildDimensionFromAnonymousBlock(dimension, viewport, styleScaleToPaper, textScaleToPaper, containingInsert, parentTransform, depth, activeBlocks, out RenderNode blockNode))
 			{
 				this._log.Add(dimension.Handle, dimension.SubclassMarker, RenderStatus.Rendered, "Rendered via anonymous dimension block.");
 				return blockNode;
@@ -2739,6 +2760,20 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 			return new GroupNode(dimension.Handle, Matrix4.Identity, nodes);
 		}
 
+		private static bool shouldPreferComputedDimensionGeometry(Dimension dimension)
+		{
+			string layerName = dimension?.Layer?.Name;
+			if (string.IsNullOrWhiteSpace(layerName))
+			{
+				return false;
+			}
+
+			string normalized = layerName.Trim().ToLowerInvariant();
+			return normalized.Contains("карт")
+				|| normalized.Contains("annot_dimensions")
+				|| normalized.Contains("размер");
+		}
+
 		private bool tryBuildDimensionFromAnonymousBlock(
 			Dimension dimension,
 			Viewport viewport,
@@ -2768,6 +2803,7 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 			activeBlocks.Add(blockKey);
 			try
 			{
+				InsertRenderContext dimensionContext = createDimensionBlockRenderContext(dimension, containingInsert);
 				var children = new List<RenderNode>();
 				foreach (Entity blockEntity in block.Entities)
 				{
@@ -2781,7 +2817,7 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 						viewport,
 						styleScaleToPaper,
 						textScaleToPaper,
-						containingInsert,
+						dimensionContext,
 						parentTransform,
 						depth + 1,
 						activeBlocks);
@@ -2804,6 +2840,45 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 			{
 				activeBlocks.Remove(blockKey);
 			}
+		}
+
+		private static InsertRenderContext createDimensionBlockRenderContext(Dimension dimension, InsertRenderContext? parentContext)
+		{
+			ACadSharp.Color color = dimension?.Color ?? ACadSharp.Color.ByLayer;
+			if (color.IsByBlock)
+			{
+				color = parentContext?.ByBlockColor ?? dimension?.Layer?.Color ?? ACadSharp.Color.Default;
+			}
+			else if (color.IsByLayer)
+			{
+				color = dimension?.Layer?.Color ?? ACadSharp.Color.Default;
+			}
+
+			LineWeightType lineWeight = dimension?.LineWeight ?? LineWeightType.ByLayer;
+			if (lineWeight == LineWeightType.ByBlock)
+			{
+				lineWeight = parentContext?.ByBlockLineWeight ?? dimension?.GetActiveLineWeightType() ?? LineWeightType.Default;
+			}
+			else if (lineWeight == LineWeightType.ByLayer)
+			{
+				lineWeight = dimension?.GetActiveLineWeightType() ?? LineWeightType.Default;
+			}
+
+			LineType lineType = dimension?.LineType;
+			if (lineType == null)
+			{
+				lineType = LineType.ByLayer;
+			}
+			else if (string.Equals(lineType.Name, LineType.ByBlockName, StringComparison.InvariantCultureIgnoreCase))
+			{
+				lineType = parentContext?.ByBlockLineType ?? dimension?.GetActiveLineType() ?? LineType.Continuous;
+			}
+			else if (string.Equals(lineType.Name, LineType.ByLayerName, StringComparison.InvariantCultureIgnoreCase))
+			{
+				lineType = dimension?.GetActiveLineType() ?? LineType.Continuous;
+			}
+
+			return new InsertRenderContext(color, lineWeight, lineType, dimension?.Layer);
 		}
 
 		private void buildLinearOrAlignedDimension(
