@@ -7,6 +7,7 @@ using ACadSharp.Pdf.Core.Render.SceneGraph;
 using ACadSharp.Tables;
 using CSMath;
 using System;
+using System.Globalization;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
@@ -145,7 +146,7 @@ namespace ACadSharp.Pdf.Core.IO
 		{
 			LineWeightType lw = entity.GetActiveLineWeightType();
 			double lwValue = lw.GetLineWeightValue();
-			this._sb.AppendLine($"{lwValue.ToPdfUnit(PdfUnitType.Millimeter)} {PdfKey.LineWidth}");
+			this._sb.AppendLine($"{lwValue.ToPdfUnit(PdfUnitType.Millimeter).ToString(this._configuration.DecimalFormat, CultureInfo.InvariantCulture)} {PdfKey.LineWidth}");
 
 			Color color = entity.GetActiveColor();
 
@@ -297,11 +298,11 @@ namespace ACadSharp.Pdf.Core.IO
 					this._sb.AppendLine($"{this.toPdfDouble(text.Height)} TL");
 					foreach (var l in mtext.GetTextLines())
 					{
-						this._sb.AppendLine($"T* ({l}) {PdfKey.TextString}");
+						this._sb.AppendLine($"T* ({escapePdfString(l)}) {PdfKey.TextString}");
 					}
 					break;
 				default:
-					this._sb.AppendLine($"({text.Value}) {PdfKey.TextString}");
+					this._sb.AppendLine($"({escapePdfString(text.Value)}) {PdfKey.TextString}");
 					break;
 			}
 
@@ -317,13 +318,13 @@ namespace ACadSharp.Pdf.Core.IO
 			this._sb.AppendLine(PdfKey.Stroke);
 
 			//Draw rectangle
-			this.appendArray(PdfKey.Rectangle, box.Min.X, box.Min.Y, box.Width, box.Height);
+			this.appendArray(PdfKey.Rectangle, box.Min.X, box.Min.Y, box.LengthX, box.LengthY);
 			this._sb.AppendLine(PdfKey.Stroke);
 
 			//Limit viewport view
 			this._sb.AppendLine(PdfKey.StackStart);
 
-			this.appendArray(PdfKey.Rectangle, box.Min.X, box.Min.Y, box.Width, box.Height);
+			this.appendArray(PdfKey.Rectangle, box.Min.X, box.Min.Y, box.LengthX, box.LengthY);
 			this._sb.AppendLine("W n");
 
 			var modelBox = viewport.GetModelBoundingBox();
@@ -819,7 +820,52 @@ namespace ACadSharp.Pdf.Core.IO
 
 		private string toPdfDouble(double value)
 		{
-			return (value / this.DenominatorScale).ToPdfUnit(this.PaperUnits).ToString(this._configuration.DecimalFormat);
+			return (value / this.DenominatorScale).ToPdfUnit(this.PaperUnits).ToString(this._configuration.DecimalFormat, CultureInfo.InvariantCulture);
+		}
+
+		private static string escapePdfString(string value)
+		{
+			if (string.IsNullOrEmpty(value))
+			{
+				return string.Empty;
+			}
+
+			StringBuilder escaped = new StringBuilder(value.Length);
+			foreach (char c in value)
+			{
+				switch (c)
+				{
+					case '\\':
+						escaped.Append("\\\\");
+						break;
+					case '(':
+						escaped.Append("\\(");
+						break;
+					case ')':
+						escaped.Append("\\)");
+						break;
+					case '\n':
+						escaped.Append("\\n");
+						break;
+					case '\r':
+						escaped.Append("\\r");
+						break;
+					case '\t':
+						escaped.Append("\\t");
+						break;
+					case '\b':
+						escaped.Append("\\b");
+						break;
+					case '\f':
+						escaped.Append("\\f");
+						break;
+					default:
+						escaped.Append(c);
+						break;
+				}
+			}
+
+			return escaped.ToString();
 		}
 
 		private void writeEntityEnd(Entity entity)

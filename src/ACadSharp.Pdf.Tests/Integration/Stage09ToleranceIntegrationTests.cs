@@ -1,6 +1,5 @@
 using ACadSharp.Entities;
 using System.IO;
-using System.Text;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -35,16 +34,10 @@ namespace ACadSharp.Pdf.Tests.Integration
 			CadDocument doc = this.LoadFixture(Fixture);
 			FileInfo pdf = this.ExportSceneGraph(doc, "stage09");
 			this.AssertValidPdf(pdf);
-			string text = readAscii(pdf);
+			string text = ReadPdfDecodedContent(pdf);
 			Assert.Contains("(0.05) Tj", text);
 			Assert.Contains("(A) Tj", text);
 			Assert.Contains("(B) Tj", text);
-		}
-
-		private static string readAscii(FileInfo file)
-		{
-			byte[] bytes = File.ReadAllBytes(file.FullName);
-			return Encoding.ASCII.GetString(bytes);
 		}
 	}
 }

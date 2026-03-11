@@ -1,6 +1,5 @@
 using ACadSharp.Entities;
 using System.IO;
-using System.Text;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -30,8 +29,9 @@ namespace ACadSharp.Pdf.Tests.Integration
 			CadDocument doc = this.LoadFixture(Fixture);
 			FileInfo pdf = this.ExportLegacy(doc, "stage08");
 			this.AssertValidPdf(pdf);
-			Assert.Contains("RAY |", readAscii(pdf));
-			Assert.Contains("XLINE |", readAscii(pdf));
+			string text = ReadPdfDecodedContent(pdf);
+			Assert.Contains("RAY |", text);
+			Assert.Contains("XLINE |", text);
 		}
 
 		[Fact]
@@ -40,15 +40,9 @@ namespace ACadSharp.Pdf.Tests.Integration
 			CadDocument doc = this.LoadFixture(Fixture);
 			FileInfo pdf = this.ExportSceneGraph(doc, "stage08");
 			this.AssertValidPdf(pdf);
-			string text = readAscii(pdf);
+			string text = ReadPdfDecodedContent(pdf);
 			Assert.Contains(" m", text);
 			Assert.Contains(" l", text);
-		}
-
-		private static string readAscii(FileInfo file)
-		{
-			byte[] bytes = File.ReadAllBytes(file.FullName);
-			return Encoding.ASCII.GetString(bytes);
 		}
 	}
 }

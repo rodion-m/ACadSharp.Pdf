@@ -59,9 +59,21 @@ namespace ACadSharp.Pdf.Core
 		/// </summary>
 		public List<Entity> Entities { get; } = new();
 
+		/// <summary>
+		/// Optional model-space entities used as the source for viewport rendering on this page.
+		/// </summary>
+		/// <remarks>
+		/// When populated, the scene-graph pipeline uses this collection instead of relying on
+		/// <see cref="Viewport.Document"/> for model selection. This is intended for verification previews
+		/// that render a focused window of model space without mutating the source drawing layouts.
+		/// </remarks>
+		public List<Entity> ModelEntities { get; } = new();
+
 		public List<Viewport> Viewports { get; } = new();
 
 		public PdfContent Contents { get; }
+
+		public PdfStandardFont DefaultFont { get; }
 
 		private readonly PdfPages _parent;
 
@@ -71,6 +83,13 @@ namespace ACadSharp.Pdf.Core
 
 			this.Items.Add("/Type", new PdfName("/Page"));
 			this.Items.Add("/Parent", this._parent.Reference);
+
+			this.DefaultFont = new PdfStandardFont();
+			var fontResources = new PdfInlineDictionary();
+			fontResources.Items.Add("/F1", this.DefaultFont.Reference);
+			var resources = new PdfInlineDictionary();
+			resources.Items.Add("/Font", fontResources);
+			this.Items.Add("/Resources", resources);
 
 			this.Contents = new PdfContent(this);
 			this.Items.Add("/Contents", this.Contents.Reference);
@@ -87,6 +106,7 @@ namespace ACadSharp.Pdf.Core
 		{
 			base.SetId(ref currNumber);
 
+			this.DefaultFont.SetId(ref currNumber);
 			this.Contents.SetId(ref currNumber);
 		}
 

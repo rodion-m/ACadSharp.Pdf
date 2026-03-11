@@ -197,12 +197,22 @@ namespace ACadSharp.Pdf.Core.Render.Pdf
 
 		private static string fillColor(ACadSharp.Color color)
 		{
-			return $"{color.R / 255d} {color.G / 255d} {color.B / 255d} rg";
+			return string.Format(
+				CultureInfo.InvariantCulture,
+				"{0} {1} {2} rg",
+				color.R / 255d,
+				color.G / 255d,
+				color.B / 255d);
 		}
 
 		private static string strokeColor(ACadSharp.Color color)
 		{
-			return $"{color.R / 255d} {color.G / 255d} {color.B / 255d} RG";
+			return string.Format(
+				CultureInfo.InvariantCulture,
+				"{0} {1} {2} RG",
+				color.R / 255d,
+				color.G / 255d,
+				color.B / 255d);
 		}
 
 		private static string escapePdfString(string value)

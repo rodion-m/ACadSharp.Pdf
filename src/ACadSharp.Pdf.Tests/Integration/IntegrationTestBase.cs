@@ -1,7 +1,9 @@
 using ACadSharp.Entities;
 using ACadSharp.IO;
+using System.IO.Compression;
 using System.IO;
 using System.Linq;
+using System.Text;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -84,9 +86,94 @@ namespace ACadSharp.Pdf.Tests.Integration
 			return doc.ModelSpace.Entities.OfType<T>().Count();
 		}
 
+		protected static string ReadPdfAscii(FileInfo file)
+		{
+			byte[] bytes = File.ReadAllBytes(file.FullName);
+			return Encoding.ASCII.GetString(bytes);
+		}
+
+		protected static string ReadPdfDecodedContent(FileInfo file)
+		{
+			byte[] pdfBytes = File.ReadAllBytes(file.FullName);
+			StringBuilder sb = new StringBuilder();
+			int scanIndex = 0;
+
+			while (tryReadNextStream(pdfBytes, ref scanIndex, out bool isFlate, out byte[] payload))
+			{
+				byte[] decoded = isFlate ? decompress(payload) : payload;
+				sb.Append(Encoding.GetEncoding(28591).GetString(decoded));
+			}
+
+			return sb.ToString();
+		}
+
 		private void onNotification(object sender, NotificationEventArgs e)
 		{
 			this._output.WriteLine(e.Message);
+		}
+
+		private static bool tryReadNextStream(byte[] pdfBytes, ref int scanIndex, out bool isFlate, out byte[] payload)
+		{
+			isFlate = false;
+			payload = null;
+
+			byte[] streamMarker = Encoding.ASCII.GetBytes("stream\n");
+			byte[] endStreamMarker = Encoding.ASCII.GetBytes("\nendstream");
+
+			int streamIndex = indexOf(pdfBytes, streamMarker, scanIndex);
+			if (streamIndex < 0)
+			{
+				return false;
+			}
+
+			int payloadStart = streamIndex + streamMarker.Length;
+			int endStreamIndex = indexOf(pdfBytes, endStreamMarker, payloadStart);
+			if (endStreamIndex < 0)
+			{
+				return false;
+			}
+
+			int dictProbeStart = System.Math.Max(0, streamIndex - 1024);
+			string nearbyHeader = Encoding.ASCII.GetString(pdfBytes, dictProbeStart, streamIndex - dictProbeStart);
+			isFlate = nearbyHeader.Contains("/Filter /FlateDecode");
+
+			int length = endStreamIndex - payloadStart;
+			payload = new byte[length];
+			System.Buffer.BlockCopy(pdfBytes, payloadStart, payload, 0, length);
+			scanIndex = endStreamIndex + endStreamMarker.Length;
+			return true;
+		}
+
+		private static int indexOf(byte[] haystack, byte[] needle, int startIndex)
+		{
+			for (int i = startIndex; i <= haystack.Length - needle.Length; i++)
+			{
+				bool match = true;
+				for (int j = 0; j < needle.Length; j++)
+				{
+					if (haystack[i + j] != needle[j])
+					{
+						match = false;
+						break;
+					}
+				}
+
+				if (match)
+				{
+					return i;
+				}
+			}
+
+			return -1;
+		}
+
+		private static byte[] decompress(byte[] compressed)
+		{
+			using var input = new MemoryStream(compressed);
+			using var deflate = new DeflateStream(input, CompressionMode.Decompress);
+			using var output = new MemoryStream();
+			deflate.CopyTo(output);
+			return output.ToArray();
 		}
 	}
 }

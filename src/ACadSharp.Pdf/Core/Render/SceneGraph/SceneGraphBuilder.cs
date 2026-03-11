@@ -26,6 +26,7 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 		private readonly MLineOffsetRenderer _mlineRenderer;
 		private readonly UnderlayRasterCache _underlayRasterCache;
 		private readonly ToleranceFrameRenderer _toleranceRenderer;
+		private readonly IReadOnlyList<Entity> _modelEntities;
 
 		private readonly struct InsertRenderContext
 		{
@@ -43,7 +44,12 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 			}
 		}
 
-		public SceneGraphBuilder(Layout layout, PdfConfiguration configuration, PropertyResolver resolver, RenderLog log)
+		public SceneGraphBuilder(
+			Layout layout,
+			PdfConfiguration configuration,
+			PropertyResolver resolver,
+			RenderLog log,
+			IReadOnlyList<Entity> modelEntities = null)
 		{
 			this._layout = layout ?? throw new ArgumentNullException(nameof(layout));
 			this._configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
@@ -55,6 +61,7 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 			this._mlineRenderer = new MLineOffsetRenderer(layout, configuration, resolver, log);
 			this._underlayRasterCache = new UnderlayRasterCache(configuration);
 			this._toleranceRenderer = new ToleranceFrameRenderer(layout, configuration, resolver, log, this._textLayout);
+			this._modelEntities = modelEntities;
 		}
 
 		public IReadOnlyList<RenderNode> Build(IReadOnlyList<Viewport> viewports, IReadOnlyList<Entity> paperEntities)
@@ -159,9 +166,15 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 				return new List<Entity>();
 			}
 
-			if (viewport.Document == null)
+			IEnumerable<Entity> sourceEntities = this._modelEntities;
+			if ((sourceEntities == null || !sourceEntities.Any()) && viewport.Document != null)
 			{
-				throw new InvalidOperationException("Viewport needs to be assigned to a document.");
+				sourceEntities = viewport.Document.Entities;
+			}
+
+			if (sourceEntities == null)
+			{
+				throw new InvalidOperationException("Viewport needs either an assigned document or explicit model entities.");
 			}
 
 			BoundingBox viewBox = viewport.GetModelBoundingBox();
@@ -173,7 +186,7 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 			}
 
 			var entities = new List<Entity>();
-			foreach (Entity entity in viewport.Document.Entities)
+			foreach (Entity entity in sourceEntities)
 			{
 				if (entity == null)
 				{
@@ -304,6 +317,10 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 							return buildPolyline(polyline, styleScaleToPaper, containingInsert);
 						case Hatch hatch:
 							return buildHatch(hatch, styleScaleToPaper, containingInsert);
+						case Spline spline:
+							return buildSpline(spline, styleScaleToPaper, containingInsert);
+						case Leader leader:
+							return buildLeader(leader, styleScaleToPaper, containingInsert);
 						case MLine mline:
 							return this._mlineRenderer.Render(
 								mline,
@@ -311,6 +328,8 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 								containingInsert?.ByBlockColor,
 								containingInsert?.ByBlockLineWeight,
 								containingInsert?.ByBlockLineType);
+						case Wipeout wipeout:
+							return buildWipeout(wipeout, styleScaleToPaper, containingInsert);
 						case RasterImage rasterImage:
 							return buildRasterImage(rasterImage);
 						case PdfUnderlay pdfUnderlay:
@@ -377,6 +396,12 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 					{
 						if (blockEntity is AttributeDefinition)
 						{
+							continue;
+						}
+
+						if (!shouldRenderInsertChild(blockEntity, viewport, cellTransform))
+						{
+							this._log.Add(blockEntity.Handle, blockEntity.SubclassMarker, RenderStatus.Skipped, "INSERT child culled outside focused viewport.");
 							continue;
 						}
 
@@ -470,6 +495,12 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 						{
 							renderEntity = mtext;
 						}
+					}
+
+					if (!shouldRenderInsertChild(renderEntity, viewport, cellTransform))
+					{
+						this._log.Add(renderEntity.Handle, renderEntity.SubclassMarker, RenderStatus.Skipped, "ATTRIB culled outside focused viewport.");
+						continue;
 					}
 
 					var node = buildEntityNode(
@@ -736,6 +767,66 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 				Math.Abs(matrix.M32) < eps;
 		}
 
+		private static void appendCircleCubic(List<PathSegment> segments, XY center, double radius)
+		{
+			const double kappa = 0.5522847498307936;
+			double k = kappa * radius;
+			XY p0 = new XY(center.X + radius, center.Y);
+			XY p1 = new XY(center.X + radius, center.Y + k);
+			XY p2 = new XY(center.X + k, center.Y + radius);
+			XY p3 = new XY(center.X, center.Y + radius);
+			XY p4 = new XY(center.X - k, center.Y + radius);
+			XY p5 = new XY(center.X - radius, center.Y + k);
+			XY p6 = new XY(center.X - radius, center.Y);
+			XY p7 = new XY(center.X - radius, center.Y - k);
+			XY p8 = new XY(center.X - k, center.Y - radius);
+			XY p9 = new XY(center.X, center.Y - radius);
+			XY p10 = new XY(center.X + k, center.Y - radius);
+			XY p11 = new XY(center.X + radius, center.Y - k);
+
+			segments.Add(new MoveTo(p0));
+			segments.Add(new CubicTo(p1, p2, p3));
+			segments.Add(new CubicTo(p4, p5, p6));
+			segments.Add(new CubicTo(p7, p8, p9));
+			segments.Add(new CubicTo(p10, p11, p0));
+			segments.Add(new ClosePath());
+		}
+
+		private bool shouldRenderInsertChild(Entity entity, Viewport viewport, Matrix4 transform)
+		{
+			if (entity == null || viewport == null)
+			{
+				return true;
+			}
+
+			if (entity is Ray || entity is XLine)
+			{
+				return true;
+			}
+
+			BoundingBox viewportBox = viewport.GetModelBoundingBox();
+			if (tryCreateExpandedClipRect((XY)viewportBox.Min, (XY)viewportBox.Max, out BoundingBox expandedViewport))
+			{
+				viewportBox = expandedViewport;
+			}
+
+			try
+			{
+				Entity candidate = isIdentity(transform) ? entity : cloneWithTransform(entity, transform);
+				BoundingBox box = candidate.GetBoundingBox();
+				if (box.Extent == BoundingBoxExtent.Infinite)
+				{
+					return true;
+				}
+
+				return viewportBox.IsIn(box, out bool partialIn) || partialIn;
+			}
+			catch
+			{
+				return true;
+			}
+		}
+
 		private PathNode buildLine(Line line, double styleScaleToPaper, InsertRenderContext? containingInsert)
 		{
 			var stroke = resolveStroke(line, styleScaleToPaper, containingInsert);
@@ -893,6 +984,34 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 			return true;
 		}
 
+		private static XYZ tryGetLeaderHookEnd(Leader leader)
+		{
+			if (leader == null || leader.Vertices == null || leader.Vertices.Count == 0)
+			{
+				return XYZ.NaN;
+			}
+
+			XYZ last = leader.Vertices[leader.Vertices.Count - 1];
+			XYZ offset = leader.CreationType switch
+			{
+				LeaderCreationType.CreatedWithTextAnnotation => leader.AnnotationOffset,
+				LeaderCreationType.CreatedWithBlockReferenceAnnotation => leader.BlockOffset,
+				_ => XYZ.Zero,
+			};
+
+			if (!isFiniteNumber(offset.X) || !isFiniteNumber(offset.Y) || !isFiniteNumber(offset.Z))
+			{
+				return XYZ.NaN;
+			}
+
+			if (offset.DistanceFrom(XYZ.Zero) <= 1e-9)
+			{
+				return XYZ.NaN;
+			}
+
+			return last + offset;
+		}
+
 		private PathNode buildPolyline(IPolyline polyline, double styleScaleToPaper, InsertRenderContext? containingInsert)
 		{
 			Entity polyEntity = (Entity)polyline;
@@ -918,6 +1037,86 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 
 			this._log.Add(polyEntity.Handle, polyEntity.SubclassMarker, RenderStatus.Rendered, "Rendered as Path.");
 			return new PathNode(polyEntity.Handle, segs, stroke, fill: null);
+		}
+
+		private PathNode buildSpline(Spline spline, double styleScaleToPaper, InsertRenderContext? containingInsert)
+		{
+			List<XYZ> pts;
+			if (!spline.TryPolygonalVertexes(this._configuration.ArcPrecision, out pts) || pts == null || pts.Count < 2)
+			{
+				pts = (spline.FitPoints?.Count ?? 0) >= 2
+					? new List<XYZ>(spline.FitPoints)
+					: new List<XYZ>(spline.ControlPoints ?? Enumerable.Empty<XYZ>());
+			}
+
+			if (pts.Count < 2)
+			{
+				this._log.Add(spline.Handle, spline.SubclassMarker, RenderStatus.Skipped, "Degenerate spline.");
+				return null;
+			}
+
+			var stroke = resolveStroke(spline, styleScaleToPaper, containingInsert);
+			var segs = new List<PathSegment>(pts.Count + 1)
+			{
+				new MoveTo((XY)pts[0]),
+			};
+			for (int i = 1; i < pts.Count; i++)
+			{
+				segs.Add(new LineTo((XY)pts[i]));
+			}
+
+			if (spline.IsClosed || spline.IsPeriodic)
+			{
+				segs.Add(new ClosePath());
+			}
+
+			this._log.Add(spline.Handle, spline.SubclassMarker, RenderStatus.Rendered, "Rendered as polygonal Path.");
+			return new PathNode(spline.Handle, segs, stroke, fill: null);
+		}
+
+		private RenderNode buildLeader(Leader leader, double styleScaleToPaper, InsertRenderContext? containingInsert)
+		{
+			if (leader.Vertices == null || leader.Vertices.Count < 2)
+			{
+				this._log.Add(leader.Handle, leader.SubclassMarker, RenderStatus.Skipped, "Degenerate leader.");
+				return null;
+			}
+
+			var vertices = new List<XYZ>(leader.Vertices);
+			XYZ hookEnd = tryGetLeaderHookEnd(leader);
+			if (!hookEnd.IsNaN() && vertices[vertices.Count - 1].DistanceFrom(hookEnd) > 1e-9)
+			{
+				vertices.Add(hookEnd);
+			}
+
+			IReadOnlyList<XYZ> pathVertices;
+			if (leader.PathType == LeaderPathType.Spline && vertices.Count >= 3)
+			{
+				pathVertices = tessellateSpline(vertices);
+			}
+			else
+			{
+				pathVertices = vertices;
+			}
+
+			if (pathVertices.Count < 2)
+			{
+				this._log.Add(leader.Handle, leader.SubclassMarker, RenderStatus.Skipped, "Leader path collapsed during tessellation.");
+				return null;
+			}
+
+			var stroke = resolveStroke(leader, styleScaleToPaper, containingInsert);
+			var segs = new List<PathSegment>(pathVertices.Count)
+			{
+				new MoveTo((XY)pathVertices[0]),
+			};
+			for (int i = 1; i < pathVertices.Count; i++)
+			{
+				segs.Add(new LineTo((XY)pathVertices[i]));
+			}
+
+			this._log.Add(leader.Handle, leader.SubclassMarker, RenderStatus.Rendered, "Rendered as leader Path.");
+			return new PathNode(leader.Handle, segs, stroke, fill: null);
 		}
 
 		private PathNode buildArc(Arc arc, double styleScaleToPaper, InsertRenderContext? containingInsert)
@@ -964,23 +1163,17 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 
 		private PathNode buildCircle(Circle circle, double styleScaleToPaper, InsertRenderContext? containingInsert)
 		{
-			var pts = circle.PolygonalVertexes(this._configuration.ArcPrecision).ToArray();
-			if (pts.Length < 2)
+			if (circle == null || circle.Radius <= 1e-12)
 			{
 				this._log.Add(circle.Handle, circle.SubclassMarker, RenderStatus.Skipped, "Degenerate circle.");
 				return null;
 			}
 
 			var stroke = resolveStroke(circle, styleScaleToPaper, containingInsert);
-			var segs = new List<PathSegment>(pts.Length + 1);
-			segs.Add(new MoveTo((XY)pts[0]));
-			for (int i = 1; i < pts.Length; i++)
-			{
-				segs.Add(new LineTo((XY)pts[i]));
-			}
-			segs.Add(new ClosePath());
+			var segs = new List<PathSegment>(6);
+			appendCircleCubic(segs, (XY)circle.Center, circle.Radius);
 
-			this._log.Add(circle.Handle, circle.SubclassMarker, RenderStatus.Rendered, "Rendered as polygonal Path (Stage 00).");
+			this._log.Add(circle.Handle, circle.SubclassMarker, RenderStatus.Rendered, "Rendered as cubic Bezier circle.");
 			return new PathNode(circle.Handle, segs, stroke, fill: null);
 		}
 
@@ -1055,6 +1248,38 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 			Matrix4 imageTransform = TransformHelper.ImagePixelToWcs(image.InsertPoint, image.UVector, image.VVector);
 			this._log.Add(image.Handle, image.SubclassMarker, RenderStatus.Rendered, $"Rendered IMAGE from '{resolvedPath}'.");
 			return new GroupNode(image.Handle, imageTransform, new[] { leaf });
+		}
+
+		private RenderNode buildWipeout(Wipeout wipeout, double styleScaleToPaper, InsertRenderContext? containingInsert)
+		{
+			if (wipeout == null)
+			{
+				return null;
+			}
+
+			if (isDegenerate(wipeout.UVector) || isDegenerate(wipeout.VVector))
+			{
+				this._log.Add(wipeout.Handle, wipeout.SubclassMarker, RenderStatus.Skipped, "WIPEOUT has degenerate U/V vectors.");
+				return null;
+			}
+
+			PathNode localPath = buildWipeoutLocalPath(wipeout);
+			if (localPath == null)
+			{
+				this._log.Add(wipeout.Handle, wipeout.SubclassMarker, RenderStatus.Skipped, "WIPEOUT has no valid clip boundary.");
+				return null;
+			}
+
+			StrokeStyle frameStroke = shouldPlotWipeoutFrame(wipeout.Document)
+				? resolveStroke(wipeout, styleScaleToPaper, containingInsert)
+				: null;
+
+			var fill = new FillStyle(new ACadSharp.Color(255, 255, 255));
+			var leaf = new PathNode(wipeout.Handle, localPath.Segments, frameStroke, fill);
+			Matrix4 transform = TransformHelper.ImagePixelToWcs(wipeout.InsertPoint, wipeout.UVector, wipeout.VVector);
+
+			this._log.Add(wipeout.Handle, wipeout.SubclassMarker, RenderStatus.Rendered, "Rendered as WIPEOUT mask.");
+			return new GroupNode(wipeout.Handle, transform, new[] { leaf });
 		}
 
 		private RenderNode buildPdfUnderlay(PdfUnderlay underlay, double geometricScaleToPaper)
@@ -1264,6 +1489,85 @@ namespace ACadSharp.Pdf.Core.Render.SceneGraph
 			}
 
 			return closedPolygonPath(underlay.Handle, points);
+		}
+
+		private PathNode buildWipeoutLocalPath(Wipeout wipeout)
+		{
+			if (wipeout == null)
+			{
+				return null;
+			}
+
+			if (wipeout.ClipMode == ClipMode.Outside)
+			{
+				this._log.Add(wipeout.Handle, wipeout.SubclassMarker, RenderStatus.Rendered, "WIPEOUT outside clipping mode is not supported; rendering inside boundary.");
+			}
+
+			List<XY> clipVertices = wipeout.ClipBoundaryVertices;
+			if (clipVertices == null || clipVertices.Count == 0)
+			{
+				double width = wipeout.Size.X > 0.0 ? wipeout.Size.X : 1.0;
+				double height = wipeout.Size.Y > 0.0 ? wipeout.Size.Y : 1.0;
+				return rectanglePath(wipeout.Handle, new XY(-0.5, -0.5), new XY(width - 0.5, height - 0.5));
+			}
+
+			if (wipeout.ClipType == ClipType.Rectangular)
+			{
+				if (clipVertices.Count < 2)
+				{
+					return null;
+				}
+
+				double minX = Math.Min(clipVertices[0].X, clipVertices[1].X);
+				double minY = Math.Min(clipVertices[0].Y, clipVertices[1].Y);
+				double maxX = Math.Max(clipVertices[0].X, clipVertices[1].X);
+				double maxY = Math.Max(clipVertices[0].Y, clipVertices[1].Y);
+				return rectanglePath(wipeout.Handle, new XY(minX, minY), new XY(maxX, maxY));
+			}
+
+			if (clipVertices.Count < 3)
+			{
+				return null;
+			}
+
+			return closedPolygonPath(wipeout.Handle, normalizeClosedPolygon(clipVertices));
+		}
+
+		private static IReadOnlyList<XY> normalizeClosedPolygon(IReadOnlyList<XY> points)
+		{
+			if (points == null || points.Count == 0)
+			{
+				return Array.Empty<XY>();
+			}
+
+			var normalized = new List<XY>(points.Count);
+			foreach (XY point in points)
+			{
+				normalized.Add(point);
+			}
+
+			if (normalized.Count > 1)
+			{
+				XY first = normalized[0];
+				XY last = normalized[normalized.Count - 1];
+				if (Math.Abs(first.X - last.X) <= 1e-9 && Math.Abs(first.Y - last.Y) <= 1e-9)
+				{
+					normalized.RemoveAt(normalized.Count - 1);
+				}
+			}
+
+			return normalized;
+		}
+
+		private static bool shouldPlotWipeoutFrame(CadDocument document)
+		{
+			string raw = document?.DictionaryVariables?.GetValue(DictionaryVariable.WipeoutFrame);
+			if (!int.TryParse(raw, out int frameValue))
+			{
+				return false;
+			}
+
+			return frameValue == (int)WipeoutFrameType.DisplayAndPlotted;
 		}
 
 		private static PathNode closedPolygonPath(ulong handle, IReadOnlyList<XY> points)

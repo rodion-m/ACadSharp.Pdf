@@ -43,8 +43,7 @@ namespace ACadSharp.Pdf.Tests.Integration
 
 		private static void AssertPdfContainsInlineImage(FileInfo pdf)
 		{
-			byte[] bytes = File.ReadAllBytes(pdf.FullName);
-			string text = System.Text.Encoding.ASCII.GetString(bytes);
+			string text = ReadPdfDecodedContent(pdf);
 			Assert.Contains("BI", text);
 			Assert.Contains("/ASCIIHexDecode", text);
 		}

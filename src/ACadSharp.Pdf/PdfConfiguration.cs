@@ -74,9 +74,23 @@ namespace ACadSharp.Pdf
 		public bool UseSceneGraph { get; set; } = false;
 
 		/// <summary>
+		/// Compress page content streams using FlateDecode.
+		/// </summary>
+		/// <remarks>
+		/// This keeps focused verification exports small enough for practical review without
+		/// changing the visible output.
+		/// </remarks>
+		public bool CompressContentStreams { get; set; } = true;
+
+		/// <summary>
 		/// Render log produced by the most recent scene-graph render.
 		/// </summary>
 		public Core.Render.RenderLog LastRenderLog { get; internal set; } = null;
+
+		/// <summary>
+		/// Render logs produced by all pages in the most recent export sequence.
+		/// </summary>
+		public IList<PageRenderLog> PageRenderLogs { get; } = new List<PageRenderLog>();
 
 		/// <summary>
 		/// Optional SHX-to-TTF font substitution overrides used by the Stage 02 text layout engine.
@@ -130,6 +144,12 @@ namespace ACadSharp.Pdf
 		internal void Notify(string message, NotificationType notificationType, Exception ex = null)
 		{
 			this.OnNotification?.Invoke(this, new NotificationEventArgs(message, notificationType, ex));
+		}
+
+		internal void RegisterRenderLog(Core.PdfPage page, Core.Render.RenderLog log)
+		{
+			this.LastRenderLog = log;
+			this.PageRenderLogs.Add(new PageRenderLog(page?.Layout?.Name, log));
 		}
 	}
 }

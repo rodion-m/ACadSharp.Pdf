@@ -1,8 +1,10 @@
 using ACadSharp.Objects;
 using ACadSharp.Pdf.Core.Render.Transforms;
 using CSMath;
+using SkiaSharp;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace ACadSharp.Pdf.Core.Render.Flattening
 {
@@ -66,6 +68,11 @@ namespace ACadSharp.Pdf.Core.Render.Flattening
 					{
 						XY anchorPaper = transformPoint(text.AnchorPt, current);
 						XY anchorPdf = TransformHelper.PaperToPdfPoints(anchorPaper, this._layout);
+						if (requiresOutlineFallback(text.Text) && tryAddOutlinedText(text, anchorPdf, commands))
+						{
+							break;
+						}
+
 						commands.Add(new FlatTextCommand(
 							text: text.Text,
 							fontSizePt: text.FontSizePt,
@@ -162,6 +169,154 @@ namespace ACadSharp.Pdf.Core.Render.Flattening
 		{
 			XYZ v = m * new XYZ(p.X, p.Y, 0.0);
 			return new XY(v.X, v.Y);
+		}
+
+		private static bool requiresOutlineFallback(string text)
+		{
+			return !string.IsNullOrEmpty(text) && text.Any(c => c > 0x00FF);
+		}
+
+		private static bool tryAddOutlinedText(TextRunNode text, XY anchorPdf, List<FlatDrawCommand> commands)
+		{
+			if (string.IsNullOrEmpty(text.Text))
+			{
+				return false;
+			}
+
+			using SKTypeface typeface = SKTypeface.FromFamilyName(text.FontName) ?? SKTypeface.Default;
+			using SKFont font = new SKFont(typeface, (float)text.FontSizePt);
+			using SKPath path = font.GetTextPath(text.Text, new SKPoint(0, 0));
+			if (path == null || path.IsEmpty)
+			{
+				return false;
+			}
+
+			IReadOnlyList<PathSegment> segments = flattenSkiaPath(path, text, anchorPdf);
+			if (segments == null || segments.Count == 0)
+			{
+				return false;
+			}
+
+			commands.Add(new FlatPathCommand(segments, stroke: null, fill: new FillStyle(text.Color)));
+			return true;
+		}
+
+		private static IReadOnlyList<PathSegment> flattenSkiaPath(SKPath path, TextRunNode text, XY anchorPdf)
+		{
+			List<PathSegment> segments = new List<PathSegment>();
+			using SKPath.RawIterator iterator = path.CreateRawIterator();
+			SKPoint[] points = new SKPoint[4];
+			SKPoint contourStart = default;
+			SKPoint current = default;
+			bool hasCurrent = false;
+
+			while (true)
+			{
+				SKPathVerb verb = iterator.Next(points);
+				if (verb == SKPathVerb.Done)
+				{
+					break;
+				}
+
+				switch (verb)
+				{
+					case SKPathVerb.Move:
+						contourStart = points[0];
+						current = points[0];
+						hasCurrent = true;
+						segments.Add(new MoveTo(transformGlyphPoint(points[0], text, anchorPdf)));
+						break;
+					case SKPathVerb.Line:
+						if (!hasCurrent)
+						{
+							contourStart = points[0];
+							current = points[0];
+							hasCurrent = true;
+							segments.Add(new MoveTo(transformGlyphPoint(points[0], text, anchorPdf)));
+						}
+						current = points[1];
+						segments.Add(new LineTo(transformGlyphPoint(points[1], text, anchorPdf)));
+						break;
+					case SKPathVerb.Quad:
+						appendQuadraticAsLines(segments, current, points[1], points[2], text, anchorPdf);
+						current = points[2];
+						break;
+					case SKPathVerb.Conic:
+						appendConicAsLines(segments, iterator.ConicWeight(), current, points[1], points[2], text, anchorPdf);
+						current = points[2];
+						break;
+					case SKPathVerb.Cubic:
+						appendCubicAsLines(segments, current, points[1], points[2], points[3], text, anchorPdf);
+						current = points[3];
+						break;
+					case SKPathVerb.Close:
+						if (hasCurrent && (Math.Abs(current.X - contourStart.X) > 1e-6 || Math.Abs(current.Y - contourStart.Y) > 1e-6))
+						{
+							segments.Add(new LineTo(transformGlyphPoint(contourStart, text, anchorPdf)));
+						}
+						segments.Add(new ClosePath());
+						current = contourStart;
+						break;
+				}
+			}
+
+			return segments;
+		}
+
+		private static void appendQuadraticAsLines(List<PathSegment> segments, SKPoint p0, SKPoint p1, SKPoint p2, TextRunNode text, XY anchorPdf)
+		{
+			const int steps = 12;
+			for (int i = 1; i <= steps; i++)
+			{
+				double t = (double)i / steps;
+				double mt = 1.0 - t;
+				SKPoint pt = new SKPoint(
+					(float)((mt * mt * p0.X) + (2.0 * mt * t * p1.X) + (t * t * p2.X)),
+					(float)((mt * mt * p0.Y) + (2.0 * mt * t * p1.Y) + (t * t * p2.Y)));
+				segments.Add(new LineTo(transformGlyphPoint(pt, text, anchorPdf)));
+			}
+		}
+
+		private static void appendConicAsLines(List<PathSegment> segments, float weight, SKPoint p0, SKPoint p1, SKPoint p2, TextRunNode text, XY anchorPdf)
+		{
+			const int steps = 16;
+			for (int i = 1; i <= steps; i++)
+			{
+				double t = (double)i / steps;
+				double mt = 1.0 - t;
+				double denom = (mt * mt) + (2.0 * weight * mt * t) + (t * t);
+				double x = ((mt * mt * p0.X) + (2.0 * weight * mt * t * p1.X) + (t * t * p2.X)) / denom;
+				double y = ((mt * mt * p0.Y) + (2.0 * weight * mt * t * p1.Y) + (t * t * p2.Y)) / denom;
+				segments.Add(new LineTo(transformGlyphPoint(new SKPoint((float)x, (float)y), text, anchorPdf)));
+			}
+		}
+
+		private static void appendCubicAsLines(List<PathSegment> segments, SKPoint p0, SKPoint p1, SKPoint p2, SKPoint p3, TextRunNode text, XY anchorPdf)
+		{
+			const int steps = 16;
+			for (int i = 1; i <= steps; i++)
+			{
+				double t = (double)i / steps;
+				double mt = 1.0 - t;
+				double x =
+					(mt * mt * mt * p0.X) +
+					(3.0 * mt * mt * t * p1.X) +
+					(3.0 * mt * t * t * p2.X) +
+					(t * t * t * p3.X);
+				double y =
+					(mt * mt * mt * p0.Y) +
+					(3.0 * mt * mt * t * p1.Y) +
+					(3.0 * mt * t * t * p2.Y) +
+					(t * t * t * p3.Y);
+				segments.Add(new LineTo(transformGlyphPoint(new SKPoint((float)x, (float)y), text, anchorPdf)));
+			}
+		}
+
+		private static XY transformGlyphPoint(SKPoint point, TextRunNode text, XY anchorPdf)
+		{
+			double x = anchorPdf.X + (text.A * point.X) - (text.C * point.Y);
+			double y = anchorPdf.Y + (text.B * point.X) - (text.D * point.Y);
+			return new XY(x, y);
 		}
 	}
 }

@@ -19,8 +19,15 @@
 		<PackageReadmeFile>README.md</PackageReadmeFile>
 		<Version>0.1.5-beta</Version>
 		<PackageOutputPath>../nupkg</PackageOutputPath>
-		<SignAssembly>True</SignAssembly>
 		<AssemblyOriginatorKeyFile>../ACadSharp.Pdf.snk</AssemblyOriginatorKeyFile>
+	</PropertyGroup>
+
+	<PropertyGroup Condition="'$(TargetFramework)' != 'net48'">
+		<SignAssembly>True</SignAssembly>
+	</PropertyGroup>
+
+	<PropertyGroup Condition="'$(TargetFramework)' == 'net48'">
+		<SignAssembly>False</SignAssembly>
 	</PropertyGroup>
 	
 	<ItemGroup Condition="'$(Configuration)' != 'Release'">
@@ -41,11 +48,14 @@
 	<ItemGroup>
 		<PackageReference Include="Clipper2" Version="2.0.0" />
 		<PackageReference Include="Docnet.Core" Version="2.6.0" />
-		<PackageReference Include="Svg.Skia" Version="3.4.1" />
 		<PackageReference Include="SkiaSharp" Version="3.119.2" />
 		<PackageReference Include="SkiaSharp.NativeAssets.Linux" Version="3.119.2" />
 		<PackageReference Include="SkiaSharp.NativeAssets.macOS" Version="3.119.2" />
 		<PackageReference Include="SkiaSharp.NativeAssets.Win32" Version="3.119.2" />
+	</ItemGroup>
+
+	<ItemGroup Condition="'$(TargetFramework)' != 'net48'">
+		<PackageReference Include="Svg.Skia" Version="3.4.1" />
 	</ItemGroup>
 
 	<Import Project="..\ACadSharp\src\CSUtilities\CSUtilities\CSUtilities.projitems" Label="Shared" />
