@@ -21,6 +21,94 @@ The stack is already strong for the target verification workflow:
 - stream reading reliability has been improved via exact-read semantics;
 - regression coverage exists for focused previews, text output, and dynamic-block handling.
 
+## Newly Confirmed Problems From AutoCAD Differential Check
+
+The latest comparison against an AutoCAD-exported verification PDF for the production cartogram drawing exposed several concrete defects that now take precedence over the broader roadmap items below.
+
+### P0. PDF content streams are still invalid for external readers
+
+Confirmed on the production DWG:
+
+- AutoCAD-exported PDF renders correctly in MuPDF/PyMuPDF;
+- `ACadSharp.Pdf` scene-graph export opens with `zlib error: unknown compression method`;
+- `ACadSharp.Pdf` legacy export opens with `zlib error: incorrect header check`;
+- both files only decompress correctly as **raw deflate**, while the PDF dictionaries advertise `/Filter /FlateDecode`.
+
+Implication:
+
+- current PDF output cannot be treated as a reliable verification artifact outside the library's own assumptions;
+- any visual diff against AutoCAD is blocked until writer correctness is fixed.
+
+Primary suspect:
+
+- `Core/PdfContent.cs` currently writes raw `DeflateStream` bytes under `/FlateDecode`.
+
+Required fix:
+
+1. emit PDF-compliant zlib-wrapped Flate streams;
+2. add regression tests that open exported PDFs with an external reader;
+3. verify both scene-graph and legacy pipelines against MuPDF/PyMuPDF.
+
+### P0. Full-page model preview extents are polluted by outlier geometry
+
+Confirmed on the same production DWG:
+
+- automatic full-model extents expand to absurd coordinates (`x ~= 17.6M`, `y ~= -7.9M`);
+- the resulting denominator scale is meaningless for human verification;
+- full-page preview is therefore not comparable to the published AutoCAD sheet/PDF.
+
+Implication:
+
+- default model-space preview currently fails as a trustworthy verification view for large production drawings with stray entities or broken extents.
+
+Primary suspect:
+
+- `ACadSharp.Pdf.Examples/Program.cs` merges all finite entity bounding boxes without rejecting outliers or offering a robust "main cluster" selection strategy.
+
+Required fix:
+
+1. add robust extents selection for model preview;
+2. detect and reject obvious outlier clusters;
+3. report why entities were excluded from preview extents;
+4. keep explicit `--window` and focused-handle mode as deterministic override paths.
+
+### P1. Differential validation must distinguish published-sheet output from raw model-space audit
+
+The AutoCAD PDF used as ground truth is a published verification artifact, not merely an arbitrary model-space dump.
+
+Confirmed observation:
+
+- suspicious raw model-space text found in an earlier DWG audit does **not** appear in the published AutoCAD PDF;
+- therefore "object exists somewhere in DWG" is not equivalent to "user-visible publication defect".
+
+Implication:
+
+- validation needs two separate bars:
+  - raw CAD audit correctness;
+  - publication/view correctness.
+
+Required fix:
+
+1. formalize verification modes: `model-audit`, `publication-sheet`, `focused-window`;
+2. compare like-for-like windows/views only;
+3. avoid reporting hidden/model-only artifacts as sheet-level visual defects unless they affect the published output.
+
+### P1. External-reader validation is now mandatory, not optional
+
+The AutoCAD differential check proved that internal success criteria are insufficient.
+
+Required rule:
+
+- every "production-ready" PDF export path must be validated by at least one external consumer such as MuPDF/PyMuPDF;
+- "file exists and our report is clean" is not enough.
+
+Minimum acceptance checks:
+
+1. exported PDF opens without parser errors;
+2. first page rasterizes successfully;
+3. text extraction returns expected visible labels for a known fixture;
+4. focused and full-page outputs both pass.
+
 ## Remaining Improvement Areas
 
 ### 1. Reader Correctness
@@ -54,6 +142,7 @@ Continue closing remaining visual gaps in the scene-graph path:
 Further improve focused verification outputs:
 
 - stronger clipping/culling outside focused windows;
+- robust preview extents selection for full-model exports;
 - more efficient reuse of repeated block content in PDF output;
 - optional tile rendering for large drawings and audit grids;
 - better reporting around what was intentionally skipped and why.
@@ -101,6 +190,9 @@ Continue hardening runtime behavior:
 
 ### Phase 1: High-Value Reader and Render Gaps
 
+- fix PDF-compliant stream compression first;
+- add external-reader regression coverage for generated PDFs;
+- fix default full-page preview extents selection;
 - identify remaining classes with verification impact;
 - implement missing parsing/render logic;
 - add targeted unit and integration tests;
@@ -128,9 +220,12 @@ Continue hardening runtime behavior:
 
 For the internal verification workflow, the stack is considered production-ready when:
 
+- generated PDFs open and rasterize in external readers without compression/parser errors;
+- default preview extents stay within the intended drawing cluster or explicitly report outlier rejection;
 - target real-world DWGs render without warnings/errors in focused verification mode;
 - focused PDFs preserve readable text and critical geometry;
 - reports clearly distinguish rendered vs intentionally skipped content;
+- comparisons against trusted published outputs are done view-to-view, not merely object-to-object;
 - no known rendering regressions exist in automated tests for covered scenarios;
 - stream handling and export logic are robust under large real-world files.
 
