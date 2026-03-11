@@ -31,7 +31,7 @@
 	</PropertyGroup>
 	
 	<ItemGroup Condition="'$(Configuration)' != 'Release'">
-		<ProjectReference Include="..\ACadSharp\src\ACadSharp\ACadSharp.csproj" />
+		<ProjectReference Include="..\..\..\ACadSharp\src\ACadSharp\ACadSharp.csproj" />
 	</ItemGroup>
 
 	<ItemGroup Condition="'$(Configuration)' == 'Release'">
@@ -58,6 +58,6 @@
 		<PackageReference Include="Svg.Skia" Version="3.4.1" />
 	</ItemGroup>
 
-	<Import Project="..\ACadSharp\src\CSUtilities\CSUtilities\CSUtilities.projitems" Label="Shared" />
+	<Import Project="..\..\..\CSUtilities\CSUtilities\CSUtilities.projitems" Label="Shared" />
 
 </Project>
